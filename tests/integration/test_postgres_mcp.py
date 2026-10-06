@@ -9,7 +9,7 @@ from asyncpg import exceptions as pgexc
 
 from backend.mcp.client_manager import result_text
 from backend.mcp.errors import InvalidArgumentsError, MCPClientError, ToolExecutionError
-from tests.integration.conftest import RO_DSN
+from tests.conftest import RO_DSN
 
 EXPECTED_TOOLS = {
     "get_daily_sales",

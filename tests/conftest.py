@@ -1,7 +1,7 @@
-"""Shared fixtures for Phase 2 integration tests.
+"""Shared fixtures for integration/evaluation tests (containerized Postgres).
 
-Integration tests require the Dockerized Postgres; when it is unreachable they
-skip with instructions instead of failing (the phase gate starts it).
+When Postgres is unreachable these fixtures skip with instructions; the phase
+gate starts the container before running tests.
 """
 
 import asyncio

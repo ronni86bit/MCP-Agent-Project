@@ -104,8 +104,8 @@ docker/                                build files, nginx.conf, initdb
 ## 9. Phase discipline and current status
 
 1. MCP fundamentals (toy server + client) — **done**
-2. postgres-mcp (5 read-only tools vs seeded business data) ← **current (implemented, pending review)**
-3. Agent runtime (FastAPI + Ollama adapter + MCP client; postgres-only investigations; tool-call smoke eval)
+2. postgres-mcp (5 read-only tools vs seeded business data) — **done**
+3. Agent runtime (FastAPI + Ollama adapter + MCP client; postgres-only investigations; tool-call smoke eval) ← **current (implemented, pending review)**
 4. Multi-server (monitoring-mcp fixtures, then github-mcp; cross-system correlation)
 5. Planning & state (explicit plans, persisted investigation state, evidence memory)
 6. Reliability (validation, retries, timeouts, rate limits, partial-failure recovery)
@@ -117,6 +117,6 @@ docker/                                build files, nginx.conf, initdb
 ## 10. Environment notes
 
 - Windows 11 dev machine, Git Bash shell; paths must stay cross-platform.
-- Ollama is installed locally; before Phase 3 it must be running with a tool-capable model pulled (model tag pinned via `OLLAMA_MODEL`). Local-model tool-calling is the top technical risk: rely on JSON-schema-constrained outputs, Pydantic validation + one repair retry, and the Phase 3 smoke eval.
-- Docker Desktop hosts Postgres for dev/tests.
+- Ollama is installed locally with `qwen3:4b-instruct` (the default `OLLAMA_MODEL`). Local-model tool-calling is the top technical risk: rely on JSON-schema-constrained outputs, Pydantic validation + one repair retry, and the Phase 3 smoke eval. CPU inference is slow (~3 s per prompt token measured): keep prompts small, cap `max_tokens`, and budget `LLM_TIMEOUT_SECONDS`/`MAX_INVESTIGATION_SECONDS` accordingly.
+- Docker Desktop hosts Postgres for dev/tests; it may need to be started manually (`docker compose up -d postgres`).
 - Python deps are resolved by uv (`uv sync`); run tools via `uv run ...`.

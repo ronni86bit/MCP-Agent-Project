@@ -1,6 +1,10 @@
-"""Development phase gate: tests + Phase 1 demo + Phase 2 postgres demo.
+"""Development phase gate: tests + demos for Phases 1-3.
 
     uv run python scripts/dev_check.py
+
+Model-dependent checks (smoke probes + canonical investigation) run as explicit
+gate steps so a missing Ollama/model fails the gate clearly instead of silently
+skipping.
 """
 
 import subprocess
@@ -22,14 +26,16 @@ def run(label: str, cmd: list[str]) -> int:
 
 def main() -> int:
     checks = [
-        ("tests", [sys.executable, "-m", "pytest", "-q"]),
+        ("tests", [sys.executable, "-m", "pytest", "tests/unit", "tests/integration", "-q"]),
         ("phase1-demo", [sys.executable, "scripts/toy_client_demo.py"]),
         ("phase2-postgres-demo", [sys.executable, "scripts/postgres_demo.py"]),
+        ("phase3-model-smoke", [sys.executable, "scripts/model_smoke.py"]),
+        ("phase3-agent-demo", [sys.executable, "scripts/agent_demo.py"]),
     ]
     for label, cmd in checks:
         if run(label, cmd) != 0:
             return 1
-    print("\nPHASE GATE PASSED (Phases 1-2)")
+    print("\nPHASE GATE PASSED (Phases 1-3)")
     return 0
 
 

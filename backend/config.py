@@ -13,7 +13,17 @@ class Settings(BaseSettings):
 
     # Phase 3 — LLM via Ollama's OpenAI-compatible endpoint.
     ollama_host: str = "http://localhost:11434"
-    ollama_model: str = ""
+    ollama_model: str = "qwen3:4b-instruct"
+    llm_temperature: float = 0.1
+    # CPU-class local models process prompts slowly (~3s/token-prompt measured
+    # on the dev machine); synthesis-sized calls need generous timeouts.
+    llm_timeout_seconds: float = 600.0
+
+    # Investigation loop bounds — the loop is never unbounded.
+    max_investigation_steps: int = 8
+    max_plan_steps: int = 4
+    max_llm_calls: int = 16
+    max_investigation_seconds: float = 1200.0
 
     # Phase 2+ — Postgres (business data + agent state + audit).
     database_url: str = ""

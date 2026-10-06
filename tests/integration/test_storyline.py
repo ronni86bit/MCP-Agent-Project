@@ -16,7 +16,7 @@ import asyncpg
 from backend.mcp.client_manager import result_text
 from backend.mcp.fixtures.loader import load_scenario
 from backend.mcp.fixtures.sales_seed import build_sales_rows, checksum, fetch_meta, seed_database
-from tests.integration.conftest import ADMIN_DSN
+from tests.conftest import ADMIN_DSN
 
 DAILY_SQL = """
 SELECT sale_date::text AS day, SUM(revenue)::float8 AS revenue, SUM(units)::bigint AS units
