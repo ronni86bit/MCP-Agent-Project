@@ -1,0 +1,25 @@
+# Development services. The backend/frontend services are added in Phase 10;
+# Phase 2 needs only PostgreSQL. Host port 5433 avoids clashes with any local PG.
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: ops-agent-postgres
+    environment:
+      POSTGRES_USER: ops_admin
+      POSTGRES_PASSWORD: ops_admin_dev
+      POSTGRES_DB: ops_agent
+      # Consumed by scripts/seed_db.py when creating the read-only role.
+      POSTGRES_MCP_RO_PASSWORD: ro_dev_password
+    ports:
+      - "5433:5432"
+    volumes:
+      - ops_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ops_admin -d ops_agent"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+volumes:
+  ops_pgdata:

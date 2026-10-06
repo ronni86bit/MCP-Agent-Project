@@ -1,4 +1,4 @@
-"""Phase gate: run the test suite, then the end-to-end demo.
+"""Development phase gate: tests + Phase 1 demo + Phase 2 postgres demo.
 
     uv run python scripts/dev_check.py
 """
@@ -21,11 +21,15 @@ def run(label: str, cmd: list[str]) -> int:
 
 
 def main() -> int:
-    if run("tests", [sys.executable, "-m", "pytest", "-q"]) != 0:
-        return 1
-    if run("demo", [sys.executable, "scripts/toy_client_demo.py"]) != 0:
-        return 1
-    print("\nPHASE GATE PASSED")
+    checks = [
+        ("tests", [sys.executable, "-m", "pytest", "-q"]),
+        ("phase1-demo", [sys.executable, "scripts/toy_client_demo.py"]),
+        ("phase2-postgres-demo", [sys.executable, "scripts/postgres_demo.py"]),
+    ]
+    for label, cmd in checks:
+        if run(label, cmd) != 0:
+            return 1
+    print("\nPHASE GATE PASSED (Phases 1-2)")
     return 0
 
 

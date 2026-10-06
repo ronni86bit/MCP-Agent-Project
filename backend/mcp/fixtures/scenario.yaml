@@ -1,0 +1,32 @@
+# Single source of truth for the canonical storyline:
+#   "Why did today's sales drop?"
+# A defective checkout release degrades the MOBILE checkout flow in the incident
+# window: mobile conversion collapses while desktop stays near-normal. The same
+# timeline will later be reused by the Monitoring/Incident fixtures (Phase 4) and
+# the GitHub deployment seed, so all three systems tell one coherent story.
+#
+# Dates are pinned (not relative to today) so the dataset is deterministic and
+# every test is reproducible. end_date is "today" for the storyline.
+
+scenario:
+  name: checkout_incident_v1
+  seed: 42
+  start_date: 2026-07-08        # first sales day (inclusive)
+  end_date: 2026-10-05          # last sales day (inclusive) == "today"; 90 days total
+
+  baseline:                     # healthy reference window used by compare_sales
+    start_date: 2026-09-06
+    end_date: 2026-10-02
+
+  incident:                     # the decline window
+    start_date: 2026-10-03
+    end_date: 2026-10-05
+    affected_channel: mobile
+    description: >
+      A defective checkout release degrades the mobile checkout flow:
+      mobile conversion collapses while desktop is only mildly affected.
+
+  impact:                       # multipliers applied to expected daily units, per incident day
+    channel_multipliers:
+      mobile: [0.50, 0.42, 0.38]
+      desktop: [0.97, 0.94, 0.93]

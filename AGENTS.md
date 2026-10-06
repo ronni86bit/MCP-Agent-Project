@@ -103,8 +103,8 @@ docker/                                build files, nginx.conf, initdb
 
 ## 9. Phase discipline and current status
 
-1. MCP fundamentals (toy server + client) ← **current**
-2. postgres-mcp (5 read-only tools vs seeded business data)
+1. MCP fundamentals (toy server + client) — **done**
+2. postgres-mcp (5 read-only tools vs seeded business data) ← **current (implemented, pending review)**
 3. Agent runtime (FastAPI + Ollama adapter + MCP client; postgres-only investigations; tool-call smoke eval)
 4. Multi-server (monitoring-mcp fixtures, then github-mcp; cross-system correlation)
 5. Planning & state (explicit plans, persisted investigation state, evidence memory)

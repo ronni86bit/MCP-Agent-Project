@@ -8,7 +8,8 @@ evidence-grounded conclusions with human-approved actions.
 Canonical scenario: *"Why did today's sales drop?"* — answered by correlating sales data,
 a recent checkout deployment, rising checkout error rates, and the resulting alert/incident.
 
-**Status: Phase 1 — MCP fundamentals (toy server + client).**
+**Status: Phase 2 — PostgreSQL MCP server (`postgres-mcp`) + seeded business dataset.**
+(Phase 1: MCP fundamentals — toy server + client — complete.)
 
 - Engineering rules & architecture decisions: see [AGENTS.md](AGENTS.md).
 - Project guide: `MCP_Tool_Using_Production_Agent_Project_Guide.docx`.
@@ -17,10 +18,56 @@ a recent checkout deployment, rising checkout error rates, and the resulting ale
 
 ```bash
 uv sync                                   # create .venv and install deps
-uv run python scripts/toy_client_demo.py  # discover + invoke tools on the toy MCP server
-uv run python scripts/dev_check.py        # phase gate: full test suite + demo
+uv run python scripts/toy_client_demo.py  # Phase 1: toy MCP server round-trip
+uv run python scripts/dev_check.py        # phase gate: tests + both demos
 ```
+
+## Phase 2 — PostgreSQL MCP (`postgres-mcp`)
+
+```bash
+docker compose up -d postgres                       # PostgreSQL 16 on localhost:5433
+uv run python scripts/seed_db.py                    # deterministic seed + read-only role
+uv run python scripts/postgres_demo.py              # discovery + all five tools via MCP
+uv run python -m pytest                             # tests (integration skips without PG)
+uv run python -m backend.mcp.servers.postgres_mcp   # run the server standalone (stdio)
+```
+
+`scripts/postgres_demo.py` starts the Postgres container and seeds it automatically when
+needed, so `scripts/dev_check.py` is a one-command gate.
+
+### The five tools (read-only, parameterized, allowlisted SQL)
+
+| Tool | Purpose |
+|---|---|
+| `get_daily_sales` | Daily totals (orders/units/revenue) for a date range, with optional product/region/channel filters |
+| `compare_sales` | Two-window comparison with absolute + percent delta; `group_by` product/region/channel locates where a change came from |
+| `get_product_sales` | Per-product totals ranked by revenue |
+| `get_region_sales` | Per-region totals ranked by revenue |
+| `get_sales_trend` | Day- or week-granularity time series |
+
+Example — the canonical baseline-vs-incident comparison:
+
+```json
+{
+  "name": "compare_sales",
+  "arguments": {
+    "window_a_start": "2026-09-28", "window_a_end": "2026-09-30",
+    "window_b_start": "2026-10-03", "window_b_end": "2026-10-05",
+    "metric": "revenue", "group_by": "channel"
+  }
+}
+```
+
+### Architecture boundary (Phase 2)
+
+`postgres-mcp` is a standalone MCP server (mcp SDK 2.x, stdio) over a Dockerized Postgres
+seeded from `backend/mcp/fixtures/scenario.yaml` — the single source of truth for the canon
+storyline timeline (healthy baseline → checkout-incident decline on the `mobile` channel →
+"today", pinned at 2026-10-05 for determinism). The server connects with a dedicated
+read-only role; every statement is a static parameterized template in `queries.py`; there is
+no generic SQL tool. No agent/LLM code exists yet (Phase 3); GitHub and Monitoring/Incident
+servers arrive in Phase 4.
 
 ## Layout
 
-`backend/` (api, agent, mcp servers + client, security, observability) · `frontend/` (React/Vite console, later phases) · `tests/` (unit, integration, e2e, evaluation) · `scripts/` · `docker/`.
+`backend/` (api, agent, mcp servers + client, security, observability) · `frontend/` (React/Vite console, later phases) · `tests/` (unit, integration, e2e, evaluation) · `scripts/` · `docker/` + `docker-compose.yml`.

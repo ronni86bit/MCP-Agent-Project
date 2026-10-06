@@ -17,6 +17,10 @@ class Settings(BaseSettings):
 
     # Phase 2+ — Postgres (business data + agent state + audit).
     database_url: str = ""
+    # DSN the postgres-mcp server connects with: a dedicated READ-ONLY role.
+    postgres_mcp_dsn: str = ""
+    # Admin DSN used only by scripts (schema setup + seeding), never by the MCP server.
+    ops_admin_dsn: str = ""
 
     # Phase 4 — fine-grained PAT, read-only scopes only.
     github_token: str = ""
