@@ -116,17 +116,20 @@ async def compare_sales(
     region: str | None = None,
     channel: str | None = None,
 ) -> dict[str, Any]:
-    """Compare sales between two date windows and quantify the change.
+    """Compare sales between two EQUAL-LENGTH date windows and quantify the change.
 
-    Returns totals for each window plus absolute delta and percent change for
-    the chosen metric. Use group_by to break the change down by product,
-    region, or channel — the fastest way to locate where a change came from.
+    Both windows must span the same number of days (e.g. 3 days vs 3 days):
+    the tool compares like-for-like totals and rejects windows of different
+    durations with a validation error instead of normalizing them. Returns
+    totals for each window plus absolute delta and percent change for the
+    chosen metric. Use group_by to break the change down by product, region,
+    or channel — the fastest way to locate where a change came from.
 
     Args:
         window_a_start: comparison-window A start, ISO date (YYYY-MM-DD), inclusive
         window_a_end: comparison-window A end, ISO date (YYYY-MM-DD), inclusive
-        window_b_start: comparison-window B start, ISO date (YYYY-MM-DD), inclusive
-        window_b_end: comparison-window B end, ISO date (YYYY-MM-DD), inclusive
+        window_b_start: comparison-window B start, ISO date (YYYY-MM-DD), inclusive; must span the same number of days as window A
+        window_b_end: comparison-window B end, ISO date (YYYY-MM-DD), inclusive; must span the same number of days as window A
         metric: which metric to compare: "revenue" (default), "orders", or "units"
         group_by: "none" (default), "product", "region", or "channel"
         product: optional exact product name filter

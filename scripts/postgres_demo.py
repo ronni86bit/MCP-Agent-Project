@@ -38,11 +38,11 @@ CANON_CALLS: list[tuple[str, dict, str]] = [
     (
         "compare_sales",
         {
-            "window_a_start": "2026-09-06", "window_a_end": "2026-10-02",
+            "window_a_start": "2026-09-30", "window_a_end": "2026-10-02",
             "window_b_start": "2026-10-03", "window_b_end": "2026-10-05",
             "metric": "revenue", "group_by": "channel",
         },
-        "baseline vs incident, broken down by channel",
+        "the 3 healthy days right before the incident vs the 3 incident days, by channel",
     ),
     (
         "get_product_sales",

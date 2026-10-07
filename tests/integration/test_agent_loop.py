@@ -136,6 +136,37 @@ async def test_single_tool_investigation_is_grounded(pg_manager):
         assert claim.evidence_ids, "every claim must cite evidence"
 
 
+async def test_agent_reselects_a_valid_comparison_after_unequal_window_rejection(pg_manager):
+    """Server rejects an unequal-duration compare_sales; the next step's
+    equal-duration comparison succeeds — recovery without silent normalization."""
+    selections = [
+        LLMToolCall(
+            id="call-bad",
+            name="compare_sales",
+            arguments={
+                "window_a_start": "2026-09-06", "window_a_end": "2026-10-02",  # 27 days
+                "window_b_start": "2026-10-03", "window_b_end": "2026-10-05",  # 3 days
+            },
+        ),
+        LLMToolCall(
+            id="call-good",
+            name="compare_sales",
+            arguments={
+                "window_a_start": "2026-09-30", "window_a_end": "2026-10-02",  # 3 days
+                "window_b_start": "2026-10-03", "window_b_end": "2026-10-05",  # 3 days
+            },
+        ),
+    ]
+    record = await _run(_scripted(selections), lambda: pg_manager())
+    assert record.status == "complete"
+    rejected = [obs for obs in record.tool_calls if obs.status == "error"]
+    assert rejected and "equal-duration" in (rejected[0].error or "")
+    assert rejected[0].evidence_id is None, "rejected comparison must produce no evidence"
+    recovered = [obs for obs in record.tool_calls if obs.status == "ok" and obs.tool == "compare_sales"]
+    assert len(recovered) == 1
+    assert record.evidence_ids  # the valid comparison became evidence
+
+
 async def test_multi_step_investigation_accumulates_evidence(pg_manager):
     selections = [
         _daily_call({"start_date": "2026-10-01", "end_date": "2026-10-05"}),

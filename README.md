@@ -40,7 +40,7 @@ needed, so `scripts/dev_check.py` is a one-command gate.
 | Tool | Purpose |
 |---|---|
 | `get_daily_sales` | Daily totals (orders/units/revenue) for a date range, with optional product/region/channel filters |
-| `compare_sales` | Two-window comparison with absolute + percent delta; `group_by` product/region/channel locates where a change came from |
+| `compare_sales` | Two-window comparison with absolute + percent delta; **windows must be equal-length** (rejected otherwise — no silent normalization); `group_by` product/region/channel locates where a change came from |
 | `get_product_sales` | Per-product totals ranked by revenue |
 | `get_region_sales` | Per-region totals ranked by revenue |
 | `get_sales_trend` | Day- or week-granularity time series |

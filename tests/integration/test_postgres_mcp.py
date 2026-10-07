@@ -130,14 +130,25 @@ async def test_invalid_arguments_are_typed_errors(pg_manager):
             "metric": "sales",
         }),
         ("compare_sales", {
+            "window_a_start": "2026-09-06", "window_a_end": "2026-10-02",  # 27 days
+            "window_b_start": "2026-10-03", "window_b_end": "2026-10-05",  # 3 days
+        }),
+        ("compare_sales", {
             "window_a_start": "2025-01-01", "window_a_end": "2025-12-31",
             "window_b_start": "2026-09-06", "window_b_end": "2026-10-02",
         }),
     ]
     async with pg_manager() as mcp:
         for name, args in bad_calls:
-            with pytest.raises((InvalidArgumentsError, ToolExecutionError)):
+            with pytest.raises((InvalidArgumentsError, ToolExecutionError)) as excinfo:
                 await mcp.call_tool(name, args)
+        # the unequal-window rejection explains the constraint to the agent
+        with pytest.raises(MCPClientError) as unequal:
+            await mcp.call_tool("compare_sales", {
+                "window_a_start": "2026-09-06", "window_a_end": "2026-10-02",
+                "window_b_start": "2026-10-03", "window_b_end": "2026-10-05",
+            })
+        assert "equal-duration" in str(unequal.value)
         # the session must remain usable after typed failures
         assert mcp_data(await mcp.call_tool(
             "get_daily_sales", {"start_date": "2026-10-05", "end_date": "2026-10-05"}

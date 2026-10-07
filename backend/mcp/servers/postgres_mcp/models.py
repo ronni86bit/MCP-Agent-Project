@@ -85,13 +85,24 @@ class CompareInputs(BaseModel):
 
     @model_validator(mode="after")
     def _windows(self) -> "CompareInputs":
+        lengths: dict[str, int] = {}
         for prefix in ("window_a", "window_b"):
             start = _iso(getattr(self, f"{prefix}_start"), f"{prefix}_start")
             end = _iso(getattr(self, f"{prefix}_end"), f"{prefix}_end")
             if end < start:
                 raise ValueError(f"{prefix} end precedes its start")
-            if (end - start).days + 1 > MAX_COMPARE_WINDOW_DAYS:
+            length = (end - start).days + 1
+            if length > MAX_COMPARE_WINDOW_DAYS:
                 raise ValueError(f"{prefix} window exceeds {MAX_COMPARE_WINDOW_DAYS} days")
+            lengths[prefix] = length
+        if lengths["window_a"] != lengths["window_b"]:
+            raise ValueError(
+                "compare_sales requires equal-duration windows: window_a spans "
+                f"{lengths['window_a']} day(s) but window_b spans {lengths['window_b']} day(s). "
+                "Raw totals are only comparable between windows of the same length; choose two "
+                "windows with the same number of days (e.g. the 3 days of interest vs the 3 days "
+                "immediately before)."
+            )
         return self
 
     @property

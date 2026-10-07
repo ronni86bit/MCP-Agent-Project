@@ -80,3 +80,23 @@ def test_compare_bad_metric_rejected():
             window_b_start="2026-10-03", window_b_end="2026-10-05",
             metric="sales",
         )
+
+
+def test_compare_equal_length_windows_accepted():
+    inp = CompareInputs(
+        window_a_start="2026-09-30", window_a_end="2026-10-02",
+        window_b_start="2026-10-03", window_b_end="2026-10-05",
+    )
+    assert inp.a_end >= inp.a_start
+
+
+def test_compare_unequal_length_windows_rejected_with_explanation():
+    with pytest.raises(ValidationError) as excinfo:
+        CompareInputs(
+            window_a_start="2026-09-06", window_a_end="2026-10-02",  # 27 days
+            window_b_start="2026-10-03", window_b_end="2026-10-05",  # 3 days
+        )
+    message = str(excinfo.value)
+    assert "equal-duration" in message
+    assert "27" in message and "3" in message
+    assert "same number of days" in message
