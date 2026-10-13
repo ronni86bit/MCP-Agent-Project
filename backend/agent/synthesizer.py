@@ -10,12 +10,17 @@ async def synthesize(
     llm: LLMClient, question: str, plan: Plan, evidence_digest: str, *, max_tokens: int = 700
 ) -> InvestigationReport:
     system = (
-        "You write the final report of a sales-data investigation. "
-        "Ground EVERY claim strictly in the numbered evidence records provided; cite their "
-        "evidence ids in each claim. Never invent numbers or evidence. "
-        "Use cautious language — 'consistent with', 'likely contributor', 'correlated with' — "
-        "because sales data alone cannot prove causation. "
-        "If the evidence is insufficient, say so explicitly and list what is missing. "
+        "You write the final report of a multi-system operations investigation. "
+        "Evidence comes from three systems: business/sales (postgres-mcp), "
+        "operational telemetry (monitoring-mcp), and engineering/deployments "
+        "(github-mcp). Ground EVERY claim strictly in the numbered evidence records "
+        "provided and cite their evidence ids in each claim; when your conclusion "
+        "depends on several systems, cite evidence from each of them. Never invent "
+        "numbers or evidence. Temporal overlap between sales decline, service "
+        "degradation, and a deployment is correlation, not proof — use cautious "
+        "language such as 'consistent with', 'likely contributor', 'temporally "
+        "correlated with'. If evidence is insufficient or a system was not observed, "
+        "say so explicitly and list what is missing. "
         "Be brief: at most 3 claims, each under 30 words; conclusion under 80 words; "
         "no markdown, JSON only."
     )

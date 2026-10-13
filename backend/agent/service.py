@@ -1,40 +1,47 @@
-"""AgentService: wires the LLM adapter, MCP manager factory, loop, and registry.
+"""AgentService: wires the LLM adapter, MCP server factories, loop, and registry.
 
 The API layer talks only to this service; it never touches the loop internals
-or any provider SDK.
+or any provider SDK. All configured MCP servers start per investigation as
+independent stdio subprocesses; a timed-out call poisons one session, so
+isolation per investigation beats sharing.
 """
 
 from __future__ import annotations
 
 import asyncio
 import sys
+from collections.abc import Callable
 
 import structlog
 
-from backend.agent.catalog import POSTGRES_EXPECTED_TOOLS
+from backend.agent.catalog import SERVER_ALLOWLISTS
 from backend.agent.llm.adapter import LLMClient, LLMError, OpenAICompatLLM
 from backend.agent.loop import InvestigationLoop
 from backend.agent.state import InvestigationRecord, InvestigationRegistry
 from backend.config import Settings
+from backend.mcp.client_manager import MCPClientManager, MultiMCPManager
 
 log = structlog.get_logger(__name__)
 
 
-def postgres_manager_factory(settings: Settings):
-    """Fresh MCP session per investigation: a timed-out call poisons a stdio
-    session, so isolation beats sharing."""
-
+def stdio_server_factory(settings: Settings, module: str, name: str) -> Callable[[], MCPClientManager]:
     def factory() -> MCPClientManager:
-        from backend.mcp.client_manager import MCPClientManager
-
         return MCPClientManager(
-            "postgres-mcp",
+            name,
             sys.executable,
-            ["-m", "backend.mcp.servers.postgres_mcp"],
+            ["-m", module],
             call_timeout_seconds=settings.mcp_call_timeout_seconds,
         )
 
     return factory
+
+
+def default_server_factories(settings: Settings) -> dict[str, Callable[[], MCPClientManager]]:
+    return {
+        "postgres-mcp": stdio_server_factory(settings, "backend.mcp.servers.postgres_mcp", "postgres-mcp"),
+        "monitoring-mcp": stdio_server_factory(settings, "backend.mcp.servers.monitoring_mcp", "monitoring-mcp"),
+        "github-mcp": stdio_server_factory(settings, "backend.mcp.servers.github_mcp", "github-mcp"),
+    }
 
 
 class AgentService:
@@ -43,8 +50,9 @@ class AgentService:
         settings: Settings,
         *,
         llm: LLMClient | None = None,
-        manager_factory=None,
-        allowlist: frozenset[str] = POSTGRES_EXPECTED_TOOLS,
+        manager_factory: Callable[[], MultiMCPManager] | None = None,
+        server_factories: dict[str, Callable[[], MCPClientManager]] | None = None,
+        allowlist: dict[str, frozenset[str]] = SERVER_ALLOWLISTS,
     ):
         self.settings = settings
         self.llm = llm or OpenAICompatLLM(
@@ -53,8 +61,12 @@ class AgentService:
             timeout_seconds=settings.llm_timeout_seconds,
             temperature=settings.llm_temperature,
         )
-        self._manager_factory = manager_factory or postgres_manager_factory(settings)
         self.allowlist = allowlist
+        self._custom_factory = manager_factory
+        self._server_factories = server_factories or default_server_factories(settings)
+        self._manager_factory = manager_factory or (
+            lambda: MultiMCPManager(self._server_factories)
+        )
         self.registry = InvestigationRegistry()
         self._tasks: set[asyncio.Task] = set()
 
@@ -89,14 +101,25 @@ class AgentService:
             await asyncio.wait_for(self.llm.check_provider(), timeout=8)
         except (LLMError, asyncio.TimeoutError) as exc:
             ollama = f"down: {exc}"
-        try:
-            async with asyncio.timeout(15):
-                async with self._manager_factory() as manager:
-                    tools = [tool.name for tool in manager.tools()]
-            postgres = f"up ({len(tools)} tools)"
-        except Exception as exc:
-            postgres = f"down: {type(exc).__name__}: {exc}"
-        return {"status": "ok", "model": self.llm.model_name, "ollama": ollama, "postgres_mcp": postgres}
+
+        server_status: dict[str, str] = {}
+        if self._custom_factory is not None:
+            try:
+                async with asyncio.timeout(25):
+                    async with self._manager_factory() as managers:
+                        total = sum(len(manager.tools()) for manager in managers.managers.values())
+                server_status["mcp"] = f"up ({total} tools)"
+            except Exception as exc:
+                server_status["mcp"] = f"down: {type(exc).__name__}: {exc}"
+        else:
+            for server, factory in self._server_factories.items():
+                try:
+                    async with asyncio.timeout(20):
+                        async with factory() as manager:
+                            server_status[server] = f"up ({len(manager.tools())} tools)"
+                except Exception as exc:
+                    server_status[server] = f"down: {type(exc).__name__}"
+        return {"status": "ok", "model": self.llm.model_name, "ollama": ollama, "mcp_servers": server_status}
 
     async def shutdown(self) -> None:
         for task in list(self._tasks):

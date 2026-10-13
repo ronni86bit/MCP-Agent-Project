@@ -105,8 +105,8 @@ docker/                                build files, nginx.conf, initdb
 
 1. MCP fundamentals (toy server + client) — **done**
 2. postgres-mcp (5 read-only tools vs seeded business data) — **done**
-3. Agent runtime (FastAPI + Ollama adapter + MCP client; postgres-only investigations; tool-call smoke eval) ← **current (implemented, pending review)**
-4. Multi-server (monitoring-mcp fixtures, then github-mcp; cross-system correlation)
+3. Agent runtime (FastAPI + Ollama adapter + MCP client; postgres-only investigations; tool-call smoke eval) — **done**
+4. Multi-server (monitoring-mcp fixtures, then github-mcp; cross-system correlation) ← **current (implemented, pending review)**
 5. Planning & state (explicit plans, persisted investigation state, evidence memory)
 6. Reliability (validation, retries, timeouts, rate limits, partial-failure recovery)
 7. Human-in-the-loop (read/write policy split; `acknowledge_alert` approval flow)

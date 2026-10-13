@@ -12,7 +12,7 @@ import asyncio
 import structlog
 
 from backend.agent import planner, selector, synthesizer
-from backend.agent.catalog import POSTGRES_EXPECTED_TOOLS, ToolCatalog
+from backend.agent.catalog import SERVER_ALLOWLISTS, ToolCatalog
 from backend.agent.evidence import EvidenceStore
 from backend.agent.executor import Executor
 from backend.agent.llm.adapter import LLMClient, LLMError
@@ -20,7 +20,7 @@ from backend.agent.models import StepRecord, ToolCallObservation, VerificationRe
 from backend.agent.state import InvestigationRecord
 from backend.agent.verifier import verify
 from backend.config import Settings
-from backend.mcp.client_manager import MCPClientManager
+from backend.mcp.client_manager import MultiMCPManager
 from backend.mcp.errors import MCPClientError
 
 log = structlog.get_logger(__name__)
@@ -34,7 +34,7 @@ class InvestigationLoop:
         manager_factory,
         record: InvestigationRecord,
         settings: Settings,
-        allowlist: frozenset[str] = POSTGRES_EXPECTED_TOOLS,
+        allowlist: dict[str, frozenset[str]] = SERVER_ALLOWLISTS,
     ):
         self.llm = llm
         self._manager_factory = manager_factory
@@ -52,8 +52,8 @@ class InvestigationLoop:
         record = self.record
         try:
             async with asyncio.timeout(self.settings.max_investigation_seconds):
-                async with self._manager_factory() as manager:
-                    await self._investigate(manager)
+                async with self._manager_factory() as managers:
+                    await self._investigate(managers)
         except TimeoutError:
             self._fail("wall-clock budget exceeded before completion")
         except LLMError as exc:
@@ -67,16 +67,22 @@ class InvestigationLoop:
 
     # -- phases --------------------------------------------------------------
 
-    async def _investigate(self, manager: MCPClientManager) -> None:
+    async def _investigate(self, managers: MultiMCPManager) -> None:
         record = self.record
-        catalog = ToolCatalog.from_manager(manager, self.allowlist)
+        catalog = ToolCatalog.from_managers(managers.managers, self.allowlist)
         record.states_visited.append("discover")
         if not catalog.allowlisted_entries():
             raise MCPClientError(
-                f"no allowlisted tools discovered on {manager.name!r}; "
-                f"discovered: {[entry.name for entry in catalog.entries]}"
+                "no allowlisted tools discovered on any configured server; "
+                f"discovered: {[f'{e.server}.{e.name}' for e in catalog.entries]}"
             )
         self._llm_tools = catalog.to_llm_tools()
+        log.info(
+            "tools_discovered",
+            investigation_id=record.investigation_id,
+            servers={server: len([e for e in catalog.entries if e.server == server]) for server in managers.managers},
+            allowlisted=len(catalog.allowlisted_entries()),
+        )
 
         record.states_visited.append("understand")
         record.understanding = await self._llm_call(
@@ -92,10 +98,10 @@ class InvestigationLoop:
             "investigation_planned",
             investigation_id=record.investigation_id,
             steps=len(record.plan.steps),
-            tools=catalog.names(),
+            tools=len(catalog.names()),
         )
 
-        executor = Executor(manager, catalog, self.store)
+        executor = Executor(managers, catalog, self.store)
         for plan_step in record.plan.steps[: self.settings.max_investigation_steps]:
             if self._finished_early:
                 break
@@ -107,7 +113,7 @@ class InvestigationLoop:
         record.states_visited.append("correlate")
         # compact digest: the synthesis turn (and its repair turn) must fit a
         # small default context window plus the max_tokens output budget
-        digest = self.store.digest(max_chars=1800)
+        digest = self.store.digest(max_chars=1100)
 
         record.states_visited.append("verify_report")
         if len(self.store) == 0:
@@ -149,11 +155,12 @@ class InvestigationLoop:
                     selector.selection_messages(
                         question=record.question,
                         plan=record.plan,
-                        digest=self.store.digest(),
+                        digest=self.store.digest(max_chars=900),
                         step_action=plan_step.action,
                         step_evidence_needed=plan_step.evidence_needed,
                         dataset_context=self._context,
                         repair_feedback=repair_feedback,
+                        recent_failures=self._recent_failures(),
                     ),
                     self._llm_tools,
                     max_tokens=400,
@@ -233,6 +240,16 @@ class InvestigationLoop:
             return
 
     # -- helpers -----------------------------------------------------------
+
+    def _recent_failures(self, limit: int = 2) -> list[str]:
+        """Compact texts of the most recent tool failures, so the model can
+        correct course instead of repeating a rejected call."""
+        failures = [
+            f"{obs.tool} (step {obs.step}) failed: {(obs.error or obs.error_class or 'unknown')[:200]}"
+            for obs in self.record.tool_calls
+            if obs.status == "error"
+        ]
+        return failures[-limit:]
 
     async def _llm_call(self, purpose: str, coro):
         self.record.llm_calls += 1

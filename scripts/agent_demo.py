@@ -36,7 +36,7 @@ async def main() -> int:
     service = AgentService(settings, llm=llm)
     try:
         record = service.start_investigation("Why did today's sales drop?")
-        deadline = time.monotonic() + settings.max_investigation_seconds + 30
+        deadline = time.monotonic() + settings.max_investigation_seconds + 60
         while record.status == "running" and time.monotonic() < deadline:
             await asyncio.sleep(2)
 
@@ -48,13 +48,17 @@ async def main() -> int:
             for step in record.plan.steps:
                 print(f"  {step.id}. {step.action}")
         print("Tool calls:")
+        evidence_servers: set[str] = set()
         for obs in record.tool_calls:
             print(
                 f"  step {obs.step}: {obs.tool} (attempt {obs.attempt}) -> {obs.status}"
                 + (f" [{obs.error_class}]" if obs.error_class else "")
                 + (f" evidence={obs.evidence_id}" if obs.evidence_id else "")
             )
+            if obs.status == "ok" and obs.evidence_id:
+                evidence_servers.add(obs.tool.split("__")[0])
         print(f"Evidence: {record.evidence_ids}")
+        print(f"Evidence systems: {sorted(evidence_servers)}")
         if record.report:
             print("\n--- REPORT ---")
             print("Conclusion:", record.report.conclusion)
@@ -71,10 +75,13 @@ async def main() -> int:
         ok = (
             record.status == "complete"
             and record.report is not None
-            and len(record.evidence_ids) >= 1
+            and len(record.evidence_ids) >= 3
+            and len(evidence_servers) >= 2
             and all(claim.evidence_ids for claim in record.report.claims)
         )
-        print("\nPHASE 3 DEMO PASSED" if ok else "\nPHASE 3 DEMO FAILED")
+        if len(evidence_servers) < 3 and ok:
+            print("WARNING: evidence spans fewer than all three MCP servers")
+        print("\nPHASE 4 DEMO PASSED" if ok else "\nPHASE 4 DEMO FAILED")
         return 0 if ok else 1
     finally:
         await service.shutdown()

@@ -12,6 +12,8 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
+from backend.agent.catalog import SERVER_DOMAINS
+
 _MAX_STR = 200
 _PREVIEW_ROWS = 3
 
@@ -80,12 +82,17 @@ class EvidenceStore:
         return len(self._items)
 
     def digest(self, max_chars: int = 4000) -> str:
-        """Compact textual digest of all evidence, used for correlation/synthesis."""
+        """Compact textual digest of all evidence, used for correlation/synthesis.
+
+        Lines are prefixed with the evidence domain (business / operational /
+        engineering) so the synthesizer can cite across systems deliberately.
+        """
         if not self._items:
             return "(no evidence collected)"
         lines = []
         for item in self._items:
-            lines.append(f"[{item.evidence_id}] {item.server}.{item.tool_name} args={item.arguments}")
+            domain = SERVER_DOMAINS.get(item.server, item.server)
+            lines.append(f"[{item.evidence_id}] ({domain}) {item.server}.{item.tool_name} args={item.arguments}")
             lines.append(f"    -> {item.summary}")
         text = "\n".join(lines)
         return text if len(text) <= max_chars else text[: max_chars - 3] + "..."

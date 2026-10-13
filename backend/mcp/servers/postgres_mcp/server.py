@@ -118,12 +118,13 @@ async def compare_sales(
 ) -> dict[str, Any]:
     """Compare sales between two EQUAL-LENGTH date windows and quantify the change.
 
-    Both windows must span the same number of days (e.g. 3 days vs 3 days):
-    the tool compares like-for-like totals and rejects windows of different
-    durations with a validation error instead of normalizing them. Returns
-    totals for each window plus absolute delta and percent change for the
-    chosen metric. Use group_by to break the change down by product, region,
-    or channel — the fastest way to locate where a change came from.
+    This is the tool for any 'compare' or 'versus' question — e.g. today vs an
+    earlier period. Both windows must span the same number of days (e.g. 3
+    days vs 3 days): the tool compares like-for-like totals and rejects windows
+    of different durations with a validation error instead of normalizing them.
+    Returns totals for each window plus absolute delta and percent change for
+    the chosen metric. Use group_by to break the change down by product,
+    region, or channel — the fastest way to locate where a change came from.
 
     Args:
         window_a_start: comparison-window A start, ISO date (YYYY-MM-DD), inclusive

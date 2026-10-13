@@ -1,12 +1,13 @@
 # Single source of truth for the canonical storyline:
 #   "Why did today's sales drop?"
-# A defective checkout release degrades the MOBILE checkout flow in the incident
-# window: mobile conversion collapses while desktop stays near-normal. The same
-# timeline will later be reused by the Monitoring/Incident fixtures (Phase 4) and
-# the GitHub deployment seed, so all three systems tell one coherent story.
+# Three systems tell ONE coherent story from this spec:
+#   - PostgreSQL (sales data): mobile-checkout conversion collapse in the incident window
+#   - Monitoring (monitoring-mcp fixtures): checkout error rate rises after the deployment,
+#     an alert fires, an incident opens
+#   - GitHub (github-mcp): the checkout deployment that preceded the degradation
 #
-# Dates are pinned (not relative to today) so the dataset is deterministic and
-# every test is reproducible. end_date is "today" for the storyline.
+# Dates/times are pinned (not relative to now) so every dataset is deterministic
+# and reproducible. end_date is "today" for the storyline.
 
 scenario:
   name: checkout_incident_v1
@@ -18,7 +19,7 @@ scenario:
     start_date: 2026-09-06
     end_date: 2026-10-02
 
-  incident:                     # the decline window
+  incident:                     # the sales-decline window
     start_date: 2026-10-03
     end_date: 2026-10-05
     affected_channel: mobile
@@ -30,3 +31,30 @@ scenario:
     channel_multipliers:
       mobile: [0.50, 0.42, 0.38]
       desktop: [0.97, 0.94, 0.93]
+
+  deployment:                   # engineering event (github-mcp scenario fixture)
+    repository: ronni86bit/MCP-Agent-Project
+    service: checkout
+    environment: production
+    deployed_at: 2026-10-02T18:30:00Z   # shortly before the degradation begins
+    commit_message: "checkout: switch mobile payment flow to a new payment provider adapter"
+
+  monitoring:                   # operational telemetry timeline (monitoring-mcp fixtures)
+    services: [checkout, payment, catalog, web]
+    alert:
+      id: ALT-2071
+      service: checkout
+      metric: error_rate
+      severity: high
+      fired_at: 2026-10-02T22:35:00Z    # after degradation starts, before the incident opens
+      message: "checkout error_rate above 5% for 15m following the 18:30Z production deployment"
+    incident:
+      id: INC-1042
+      service: checkout
+      severity: high
+      started_at: 2026-10-02T23:00:00Z
+      resolved_at: null                  # still open at "today"
+      title: "Checkout error rate elevated on mobile"
+      summary: >
+        Checkout error rate spiked after the 18:30Z production deployment;
+        mobile payment conversions are failing at elevated rates.

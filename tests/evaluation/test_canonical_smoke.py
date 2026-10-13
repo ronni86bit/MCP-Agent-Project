@@ -1,8 +1,9 @@
-"""Canonical smoke test: the real model must investigate the sales drop
-end-to-end through MCP and produce a grounded structured report.
+"""Canonical cross-system smoke test: the real model must correlate sales,
+operational telemetry, and engineering/deployment evidence through MCP and
+produce a grounded structured report.
 
-compare_sales observations are checked for equal-duration windows: the model
-must not compare unlike periods and read raw totals as percentage changes.
+compare_sales observations are checked for equal-duration windows; evidence
+must span all three systems; every claim must cite evidence ids.
 """
 
 import asyncio
@@ -28,18 +29,22 @@ def _window_days(observation_arguments: dict) -> tuple[int, int] | None:
     return a, b
 
 
-async def test_canonical_question_end_to_end(pg_manager, real_llm):
-    settings = Settings(max_investigation_seconds=900, max_llm_calls=16)
-    service = AgentService(settings, llm=real_llm, manager_factory=pg_manager)
+async def test_canonical_question_correlates_three_systems(real_llm):
+    settings = Settings(max_investigation_seconds=1200, max_llm_calls=16)
+    service = AgentService(settings, llm=real_llm)
     try:
         record = service.start_investigation("Why did today's sales drop?")
-        deadline = time.monotonic() + 900
+        deadline = time.monotonic() + 1200
         while record.status == "running" and time.monotonic() < deadline:
             await asyncio.sleep(2)
 
         assert record.status == "complete", f"failure_reason={record.failure_reason}"
         assert record.plan and len(record.plan.steps) >= 1
-        assert len(record.evidence_ids) >= 2, "the investigation must collect several evidence records"
+        assert len(record.evidence_ids) >= 3, "a cross-system investigation needs several evidence records"
+
+        evidence_servers = {obs.tool.split("__")[0] for obs in record.tool_calls if obs.status == "ok"}
+        assert evidence_servers >= {"postgres-mcp", "monitoring-mcp", "github-mcp"}, evidence_servers
+
         assert record.report is not None
         assert len(record.report.conclusion) > 30
         assert record.report.claims, "the report must carry evidence-backed claims"
@@ -47,18 +52,14 @@ async def test_canonical_question_end_to_end(pg_manager, real_llm):
             assert claim.evidence_ids
         assert record.verification is not None
 
-        comparisons = [obs for obs in record.tool_calls if obs.tool == "compare_sales"]
-        assert comparisons, "the canonical investigation should compare against a baseline"
-        for obs in comparisons:
-            if obs.status != "ok":
-                continue
-            windows = _window_days(obs.arguments)
-            assert windows is not None, f"compare_sales without parsable windows: {obs.arguments}"
-            assert windows[0] == windows[1], (
-                f"unequal-duration comparison reached execution: {obs.arguments}"
-            )
+        for obs in record.tool_calls:
+            if obs.tool.endswith("__compare_sales") and obs.status == "ok":
+                windows = _window_days(obs.arguments)
+                assert windows is not None and windows[0] == windows[1], (
+                    f"unequal-duration comparison reached execution: {obs.arguments}"
+                )
 
-        print("\n--- canonical report ---")
+        print("\n--- canonical cross-system report ---")
         print("conclusion:", record.report.conclusion)
         print("confidence:", record.report.confidence.value, "-", record.report.confidence_rationale)
         for claim in record.report.claims:

@@ -8,8 +8,8 @@ evidence-grounded conclusions with human-approved actions.
 Canonical scenario: *"Why did today's sales drop?"* — answered by correlating sales data,
 a recent checkout deployment, rising checkout error rates, and the resulting alert/incident.
 
-**Status: Phase 3 — agent runtime (Ollama adapter + InvestigationLoop + FastAPI).**
-(Phase 1: MCP fundamentals · Phase 2: postgres-mcp + seeded business data — complete.)
+**Status: Phase 4 — multi-server MCP + cross-system correlation (monitoring-mcp, github-mcp).**
+(Phase 1: MCP fundamentals · Phase 2: postgres-mcp + seeded business data · Phase 3: agent runtime — complete.)
 
 - Engineering rules & architecture decisions: see [AGENTS.md](AGENTS.md).
 - Project guide: `MCP_Tool_Using_Production_Agent_Project_Guide.docx`.
@@ -98,9 +98,41 @@ Key env knobs (see `.env.example`): `OLLAMA_HOST`, `OLLAMA_MODEL`, `MAX_INVESTIG
 
 ### Architecture boundary (Phase 3)
 
-The agent runtime only ever sees tools through MCP discovery (policy allowlist filters
-unexpected ones) and only ever reaches the LLM through the adapter interface. No GitHub,
-Monitoring/Incident, Slack, approvals, persistence, or frontend yet — those are Phases 4-8.
+The agent runtime only ever sees tools through MCP discovery (policy allowlists filter
+unexpected ones) and only ever reaches the LLM through the adapter interface. No approvals,
+persistence, or frontend yet — Phases 5-8.
+
+## Phase 4 — Multi-server MCP + cross-system correlation
+
+The agent now investigates across three independent MCP servers (14 read-only tools) and
+correlates their evidence for the canonical question:
+
+| Server | Tools | Evidence domain |
+|---|---|---|
+| `postgres-mcp` | 5 sales tools | business |
+| `monitoring-mcp` | `get_service_metrics`, `get_error_rate`, `get_incidents`, `get_recent_alerts`, `compare_metric_windows` (deterministic fixtures from `scenario.yaml`) | operational |
+| `github-mcp` | `get_recent_commits`, `get_deployments`, `get_open_issues`, `get_repository_activity` (GitHub REST; read-only token) | engineering |
+
+Tools are addressed as `server__tool` in the LLM's tool catalog; duplicate base tool names
+across servers are a typed configuration error. Evidence records carry their originating
+server and domain, and the report's claims must cite them — temporal overlap between sales
+decline, service degradation, and a deployment is reported as correlation, never causation.
+
+The canonical storyline is one timeline from `backend/mcp/fixtures/scenario.yaml`: healthy
+baseline → checkout deployment 2026-10-02T18:30Z → checkout error rate spikes → alert
+ALT-2071 → incident INC-1042 → mobile-channel sales collapse 10-03..10-05.
+
+```bash
+uv run python scripts/seed_monitoring.py    # materialize monitoring fixtures as JSON
+uv run python scripts/model_smoke.py        # 6 selection probes across all three servers
+uv run python scripts/agent_demo.py         # canonical cross-system investigation
+```
+
+GitHub configuration (optional): set `GITHUB_TOKEN` (fine-grained, read-only) and
+`GITHUB_REPO` in `.env`. Without a token, public repositories work unauthenticated at lower
+rate limits. `get_deployments` includes one record labeled `source=scenario-fixture` — the
+demo storyline's checkout deployment, not live GitHub state. Tests never touch live GitHub:
+they run the server against a local mock (`GITHUB_API_BASE_URL`).
 
 ## Layout
 

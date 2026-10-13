@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import os
 import time
+from collections.abc import Callable
 from contextlib import AsyncExitStack
 from dataclasses import dataclass
 from pathlib import Path
@@ -115,7 +116,9 @@ class MCPClientManager:
         self.name = name
         self.call_timeout_seconds = call_timeout_seconds
         self.session_timeout_seconds = session_timeout_seconds
-        resolved_env = dict(env) if env is not None else dict(os.environ)
+        # caller env entries overlay the parent environment (additive), so tests
+        # can inject e.g. GITHUB_API_BASE_URL without dropping PATH
+        resolved_env = {**os.environ, **(env or {})}
         # PYTHONPATH so `-m backend.mcp.servers.<name>` resolves regardless of caller cwd.
         resolved_env.setdefault("PYTHONPATH", str(REPO_ROOT))
         resolved_env.setdefault("PYTHONUTF8", "1")
@@ -251,3 +254,46 @@ class MCPClientManager:
             error=str(error),
         )
         raise error from cause
+
+
+class MultiMCPManager:
+    """Owns one session per configured MCP server (independent processes).
+
+    Servers never see each other; orchestration stays in the agent runtime.
+    Tool addressing is (server, tool_name) — the catalog builds qualified
+    names (`server__tool`) for the LLM on top of this.
+    """
+
+    def __init__(self, factories: dict[str, Callable[[], MCPClientManager]]):
+        self.factories = factories
+        self.managers: dict[str, MCPClientManager] = {}
+        self._stack: AsyncExitStack | None = None
+
+    async def __aenter__(self) -> "MultiMCPManager":
+        stack = AsyncExitStack()
+        try:
+            for server, factory in self.factories.items():
+                self.managers[server] = await stack.enter_async_context(factory())
+        except BaseException:
+            await stack.aclose()
+            self.managers.clear()
+            raise
+        self._stack = stack
+        return self
+
+    async def __aexit__(self, *exc_info: object) -> None:
+        stack, self._stack = self._stack, None
+        self.managers.clear()
+        if stack is not None:
+            await stack.aclose()
+
+    def manager(self, server: str) -> MCPClientManager:
+        try:
+            return self.managers[server]
+        except KeyError:
+            raise TransportError(
+                f"unknown MCP server {server!r}; configured: {sorted(self.managers)}"
+            ) from None
+
+    async def call_tool(self, server: str, name: str, arguments: dict[str, Any] | None = None) -> Any:
+        return await self.manager(server).call_tool(name, arguments)

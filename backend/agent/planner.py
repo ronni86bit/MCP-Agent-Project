@@ -51,10 +51,16 @@ async def make_plan(
     settings: Settings,
 ) -> Plan:
     system = (
-        "You plan small investigations over a sales database. "
+        "You plan small investigations over a demo operations stack. "
         f"You may only use these tools: {', '.join(tool_names)}. "
+        "The tools come from three systems: postgres-mcp (business/sales data), monitoring-mcp "
+        "(service health: error rates, alerts, incidents), and github-mcp (commits, deployments, "
+        "issues). For 'why did X happen' questions, plan steps that check every relevant system — "
+        "a business decline usually needs the sales numbers AND service health AND recent "
+        "software changes before a confident answer is possible. "
         f"Produce at most {settings.max_plan_steps} steps; prefer the fewest steps that answer the "
         "question — each step is exactly one tool call, and redundant repeats waste the budget. "
+        "When a step compares two windows, they must span the same number of days. "
         "Steps are executed in order; later steps may use earlier evidence."
     )
     user = (

@@ -1,9 +1,11 @@
 """VALIDATE + EXECUTE: schema-check the selection, then run it through MCP.
 
-Validation uses the tool's own JSON schema from MCP discovery (never a local
-hardcode). Invalid arguments and unknown tools are typed failures for the
-caller (the loop owns the one repair attempt); execution failures are the
-typed MCPClientError taxonomy from Phase 1 and are never retried blindly.
+Validation uses each tool's own JSON schema from MCP discovery (never a local
+hardcode); selections address tools by qualified name (`server__tool`) and
+execution goes through the MultiMCPManager, which routes to the owning
+server's session. Invalid arguments and unknown tools are typed failures for
+the caller (the loop owns the one repair attempt); execution failures are the
+typed MCPClientError taxonomy and are never retried blindly.
 """
 
 from __future__ import annotations
@@ -15,7 +17,7 @@ import time
 from backend.agent.catalog import ToolCatalog
 from backend.agent.evidence import EvidenceStore
 from backend.agent.models import ToolCallRequest
-from backend.mcp.client_manager import MCPClientManager
+from backend.mcp.client_manager import MultiMCPManager
 from backend.mcp.errors import MCPClientError
 
 log = structlog.get_logger(__name__)
@@ -47,18 +49,20 @@ class ExecutionOutcome:
 
 
 class Executor:
-    def __init__(self, manager: MCPClientManager, catalog: ToolCatalog, store: EvidenceStore):
-        self.manager = manager
+    def __init__(self, managers: MultiMCPManager, catalog: ToolCatalog, store: EvidenceStore):
+        self.managers = managers
         self.catalog = catalog
         self.store = store
 
     def validate(self, request: ToolCallRequest) -> ValidationOutcome:
-        entry = self.catalog.get(request.name)
+        entry = self.catalog.resolve(request.name)
         if entry is None:
-            return ValidationOutcome(False, f"unknown tool {request.name!r} (not offered by the server)")
+            return ValidationOutcome(False, f"unknown tool {request.name!r} (not offered by any configured server)")
         if not entry.allowlisted:
             return ValidationOutcome(
-                False, f"tool {request.name!r} is outside the policy allowlist and may not be executed"
+                False,
+                f"tool {request.name!r} on {entry.server} is outside the policy allowlist "
+                f"({entry.policy}) and may not be executed",
             )
         arguments = request.arguments
         if "_raw" in arguments:
@@ -70,15 +74,17 @@ class Executor:
         return ValidationOutcome(True)
 
     async def execute(self, request: ToolCallRequest, step: int) -> ExecutionOutcome:
+        entry = self.catalog.resolve(request.name)
+        assert entry is not None  # validate() must have passed
         started = time.perf_counter()
         try:
-            result = await self.manager.call_tool(request.name, request.arguments)
+            result = await self.managers.call_tool(entry.server, entry.name, request.arguments)
         except MCPClientError as exc:
             duration = (time.perf_counter() - started) * 1000
             log.warning(
                 "agent_tool_failed",
-                server=self.manager.name,
-                tool=request.name,
+                server=entry.server,
+                tool=entry.name,
                 step=step,
                 error_class=type(exc).__name__,
                 duration_ms=round(duration, 1),
@@ -92,16 +98,16 @@ class Executor:
         duration = (time.perf_counter() - started) * 1000
         payload = _payload_of(result)
         evidence = self.store.add(
-            tool_name=request.name,
-            server=self.manager.name,
+            tool_name=entry.name,
+            server=entry.server,
             step=step,
             arguments=request.arguments,
             payload=payload,
         )
         log.info(
             "agent_tool_executed",
-            server=self.manager.name,
-            tool=request.name,
+            server=entry.server,
+            tool=entry.name,
             step=step,
             evidence_id=evidence.evidence_id,
             duration_ms=round(duration, 1),

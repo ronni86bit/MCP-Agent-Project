@@ -14,12 +14,14 @@ from backend.agent.llm.adapter import LLMToolCall
 from backend.agent.service import AgentService
 from backend.config import Settings
 from backend.main import create_app
+from backend.mcp.client_manager import MultiMCPManager
 from tests.integration.test_agent_loop import _daily_call, _scripted
 
 
 def _service(pg_manager) -> AgentService:
     settings = Settings(max_investigation_seconds=90, max_llm_calls=16)
-    return AgentService(settings, llm=_scripted([_daily_call()]), manager_factory=pg_manager)
+    factory = lambda: MultiMCPManager({"postgres-mcp": lambda: pg_manager()})  # noqa: E731
+    return AgentService(settings, llm=_scripted([_daily_call()]), manager_factory=factory)
 
 
 @pytest.fixture
@@ -37,7 +39,7 @@ async def test_health_reports_component_status(client):
     body = response.json()
     assert body["status"] == "ok"
     assert body["ollama"] == "up"  # scripted adapter always checks out
-    assert body["postgres_mcp"].startswith("up")
+    assert body["mcp_servers"]["mcp"].startswith("up")
     assert body["model"]
 
 
@@ -63,7 +65,7 @@ async def test_investigation_create_poll_get_grounds_report(client):
     for claim in payload["report"]["claims"]:
         assert claim["evidence_ids"]
     assert payload["plan"]["steps"]
-    assert payload["tool_calls"][0]["tool"] == "get_daily_sales"
+    assert payload["tool_calls"][0]["tool"] == "postgres-mcp__get_daily_sales"
 
 
 async def test_invalid_question_is_rejected(client):

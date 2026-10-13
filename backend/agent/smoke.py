@@ -1,8 +1,9 @@
-"""Minimal tool-selection smoke probe (Phase 3 model evaluation).
+"""Minimal tool-selection smoke probe (model evaluation).
 
-Not the Phase 9 benchmark: a handful of simple prompts recording which tool
-the model selected, whether arguments validated, whether the MCP invocation
-succeeded, and latency. Shared by the pytest smoke test and scripts/model_smoke.py.
+Not the Phase 9 benchmark: simple prompts recording which tool the model
+selected (across all configured servers), whether arguments validated,
+whether the MCP invocation succeeded, and latency. Shared by the pytest smoke
+test and scripts/model_smoke.py.
 """
 
 from __future__ import annotations
@@ -13,35 +14,38 @@ from typing import Any
 import structlog
 
 from backend.agent import planner, selector
-from backend.agent.catalog import POSTGRES_EXPECTED_TOOLS, ToolCatalog
+from backend.agent.catalog import SERVER_ALLOWLISTS, ToolCatalog
 from backend.agent.evidence import EvidenceStore
 from backend.agent.executor import Executor
 from backend.agent.llm.adapter import LLMClient
 from backend.agent.models import Plan, PlanStep
-from backend.mcp.client_manager import MCPClientManager
+from backend.mcp.client_manager import MultiMCPManager
 
 log = structlog.get_logger(__name__)
 
+# (question, expected qualified tool)
 DEFAULT_PROBES: list[tuple[str, str]] = [
-    ("Show me today's sales.", "get_daily_sales"),
-    ("Compare today's revenue with the previous period.", "compare_sales"),
-    ("Which region had the lowest sales?", "get_region_sales"),
-    ("Show the sales trend.", "get_sales_trend"),
+    ("Show me today's sales.", "postgres-mcp__get_daily_sales"),
+    ("Compare today's revenue with the previous period.", "postgres-mcp__compare_sales"),
+    ("Which region had the lowest sales?", "postgres-mcp__get_region_sales"),
+    ("Show the sales trend.", "postgres-mcp__get_sales_trend"),
+    ("Is the checkout service healthy right now?", "monitoring-mcp__get_error_rate"),
+    ("What was deployed recently?", "github-mcp__get_deployments"),
 ]
 
 
 async def run_selection_probes(
-    llm: LLMClient, manager: MCPClientManager, prompts: list[tuple[str, str]] | None = None
+    llm: LLMClient, managers: MultiMCPManager, prompts: list[tuple[str, str]] | None = None
 ) -> list[dict[str, Any]]:
     """Run one selection + MCP invocation per prompt; returns result rows."""
     prompts = prompts or DEFAULT_PROBES
-    catalog = ToolCatalog.from_manager(manager, POSTGRES_EXPECTED_TOOLS)
+    catalog = ToolCatalog.from_managers(managers.managers, SERVER_ALLOWLISTS)
     store = EvidenceStore("smoke")
-    executor = Executor(manager, catalog, store)
+    executor = Executor(managers, catalog, store)
     context = planner.dataset_context()
     plan = Plan(
         goal="fulfil the user's request with one tool call",
-        steps=[PlanStep(id=1, action="the user request below", evidence_needed="the relevant sales data")],
+        steps=[PlanStep(id=1, action="the user request below", evidence_needed="the relevant data")],
         expected_evidence=[],
         completion_criteria="the request is answered with real data",
     )

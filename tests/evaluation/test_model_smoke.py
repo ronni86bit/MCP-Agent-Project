@@ -1,18 +1,21 @@
-"""Phase 3 model smoke evaluation: tool selection on the real local model.
-
-Small and deterministic by design; the full benchmark belongs to Phase 9.
-"""
+"""Phase 4 model smoke evaluation: tool selection across all three MCP
+servers on the real local model. Small and deterministic by design; the full
+benchmark belongs to Phase 9."""
 
 import pytest
 
+from backend.agent.service import default_server_factories
 from backend.agent.smoke import DEFAULT_PROBES, run_selection_probes
+from backend.config import get_settings
+from backend.mcp.client_manager import MultiMCPManager
 
 pytestmark = pytest.mark.ollama
 
 
-async def test_model_selects_expected_tools(pg_manager, real_llm):
-    async with pg_manager() as manager:
-        rows = await run_selection_probes(real_llm, manager, DEFAULT_PROBES)
+async def test_model_selects_expected_tools(real_llm):
+    settings = get_settings()
+    async with MultiMCPManager(default_server_factories(settings)) as managers:
+        rows = await run_selection_probes(real_llm, managers, DEFAULT_PROBES)
     for row in rows:
         print(
             f"{row['question']!r:55} selected={row['selected_tool']} "

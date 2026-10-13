@@ -8,9 +8,10 @@ import asyncio
 import sys
 
 from backend.agent.llm.adapter import LLMError, OpenAICompatLLM
-from backend.agent.service import postgres_manager_factory
+from backend.agent.service import default_server_factories
 from backend.agent.smoke import DEFAULT_PROBES, run_selection_probes
 from backend.config import get_settings
+from backend.mcp.client_manager import MultiMCPManager
 from backend.observability.logging import configure_logging
 
 
@@ -30,9 +31,10 @@ async def main() -> int:
         print(f"FAILED: {exc}")
         return 1
 
-    factory = postgres_manager_factory(settings)
-    async with factory() as manager:
-        rows = await run_selection_probes(llm, manager, DEFAULT_PROBES)
+    from backend.mcp.client_manager import MultiMCPManager as _M
+
+    async with _M(default_server_factories(settings)) as managers:
+        rows = await run_selection_probes(llm, managers, DEFAULT_PROBES)
 
     print(f"\n{'question':<50} {'selected':<18} {'args':<6} {'invoked':<8} {'select ms':>9}")
     for row in rows:

@@ -29,13 +29,13 @@ def main() -> int:
         ("tests", [sys.executable, "-m", "pytest", "tests/unit", "tests/integration", "-q"]),
         ("phase1-demo", [sys.executable, "scripts/toy_client_demo.py"]),
         ("phase2-postgres-demo", [sys.executable, "scripts/postgres_demo.py"]),
-        ("phase3-model-smoke", [sys.executable, "scripts/model_smoke.py"]),
-        ("phase3-agent-demo", [sys.executable, "scripts/agent_demo.py"]),
+        ("model-smoke", [sys.executable, "scripts/model_smoke.py"]),
+        ("phase4-agent-demo", [sys.executable, "scripts/agent_demo.py"]),
     ]
     for label, cmd in checks:
         if run(label, cmd) != 0:
             return 1
-    print("\nPHASE GATE PASSED (Phases 1-3)")
+    print("\nPHASE GATE PASSED (Phases 1-4)")
     return 0
 
 

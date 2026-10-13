@@ -32,8 +32,10 @@ class Settings(BaseSettings):
     # Admin DSN used only by scripts (schema setup + seeding), never by the MCP server.
     ops_admin_dsn: str = ""
 
-    # Phase 4 — fine-grained PAT, read-only scopes only.
+    # Phase 4 — fine-grained PAT, read-only scopes only. Optional for public repos.
     github_token: str = ""
+    # Repository github-mcp reads (owner/name).
+    github_repo: str = "ronni86bit/MCP-Agent-Project"
 
 
 @lru_cache
