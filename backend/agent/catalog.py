@@ -148,7 +148,7 @@ class ToolCatalog(BaseModel):
                 "type": "function",
                 "function": {
                     "name": entry.qualified_name,
-                    "description": (entry.description or entry.name)[:320],
+                    "description": (entry.description or entry.name)[:500],
                     "parameters": _slim_parameters(entry.parameters),
                 },
             }

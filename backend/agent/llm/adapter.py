@@ -15,12 +15,15 @@ from __future__ import annotations
 import json
 import re
 from abc import ABC, abstractmethod
+from collections.abc import Callable, Awaitable
 from typing import Any, Literal
 
 import structlog
 from openai import APIConnectionError, APITimeoutError, AsyncOpenAI, BadRequestError, NotFoundError
 from openai import APIStatusError
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
+
+from backend.reliability import retry_async
 
 log = structlog.get_logger(__name__)
 
@@ -49,6 +52,10 @@ class ProviderResponseError(LLMError):
 
 class MalformedOutputError(LLMError):
     """The model could not produce schema-valid JSON after the repair retry."""
+
+
+# transient provider failures worth one bounded retry (never auth/model errors)
+_TRANSIENT = (ProviderUnavailableError, ProviderTimeoutError)
 
 
 class LLMMessage(BaseModel):
@@ -119,6 +126,22 @@ class LLMClient(ABC):
         """Return a schema-validated model instance (one repair retry on
         malformed output; raises MalformedOutputError after the retry)."""
 
+    def _retry_transient(self, coro_factory: Callable[[], Awaitable[Any]], purpose: str) -> Any:
+        """Bounded retry for transient provider failures only."""
+        return retry_async(
+            coro_factory,
+            attempts=1 + self._retry_attempts,
+            base_delay_seconds=self._retry_backoff_seconds,
+            retry_on=_TRANSIENT,
+            on_retry=lambda attempt, delay, exc: log.warning(
+                "llm_transient_retry",
+                purpose=purpose,
+                attempt=attempt,
+                delay_seconds=round(delay, 2),
+                error=str(exc)[:160],
+            ),
+        )
+
 
 class OpenAICompatLLM(LLMClient):
     """Adapter for any OpenAI-compatible chat endpoint (Ollama default)."""
@@ -132,9 +155,13 @@ class OpenAICompatLLM(LLMClient):
         temperature: float = 0.1,
         api_key: str = "ollama",  # placeholder; local providers do not check it
         http_client: Any | None = None,  # injectable transport seam (tests)
+        retry_attempts: int = 1,
+        retry_backoff_seconds: float = 2.0,
     ):
         self.model_name = model
         self._temperature = temperature
+        self._retry_attempts = retry_attempts
+        self._retry_backoff_seconds = retry_backoff_seconds
         client_kwargs: dict[str, Any] = dict(
             base_url=base_url, api_key=api_key, timeout=timeout_seconds, max_retries=0
         )
@@ -161,8 +188,11 @@ class OpenAICompatLLM(LLMClient):
     async def chat_with_tools(
         self, messages: list[LLMMessage], tools: list[dict], *, max_tokens: int | None = None
     ) -> LLMResponse:
-        response = await self._create(
-            [self._to_openai(message) for message in messages], tools=tools, max_tokens=max_tokens
+        response = await self._retry_transient(
+            lambda: self._create(
+                [self._to_openai(message) for message in messages], tools=tools, max_tokens=max_tokens
+            ),
+            purpose="chat_with_tools",
         )
         choice = response.choices[0].message
         tool_calls = [
@@ -195,11 +225,14 @@ class OpenAICompatLLM(LLMClient):
         convo = [instruction, *messages]
         last_error = "unknown"
         for attempt in (1, 2):
-            response = await self._create(
-                [self._to_openai(message) for message in convo],
-                tools=None,
-                max_tokens=max_tokens,
-                json_mode=True,
+            response = await self._retry_transient(
+                lambda: self._create(
+                    [self._to_openai(message) for message in convo],
+                    tools=None,
+                    max_tokens=max_tokens,
+                    json_mode=True,
+                ),
+                purpose=f"structured:{schema_model.__name__}",
             )
             content = strip_think(response.choices[0].message.content or "")
             llm_response = LLMResponse(

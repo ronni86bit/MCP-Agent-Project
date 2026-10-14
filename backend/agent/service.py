@@ -62,12 +62,20 @@ class AgentService:
             model=settings.ollama_model,
             timeout_seconds=settings.llm_timeout_seconds,
             temperature=settings.llm_temperature,
+            retry_attempts=settings.llm_retry_attempts,
+            retry_backoff_seconds=settings.llm_retry_backoff_seconds,
         )
         self.allowlist = allowlist
         self._custom_factory = manager_factory
         self._server_factories = server_factories or default_server_factories(settings)
         self._manager_factory = manager_factory or (
-            lambda: MultiMCPManager(self._server_factories)
+            lambda: MultiMCPManager(
+                self._server_factories,
+                rate_limits_per_minute={"github-mcp": 60},
+                default_rate_limit_per_minute=settings.rate_limit_per_server_per_minute,
+                circuit_failure_threshold=settings.circuit_failure_threshold,
+                circuit_cooldown_seconds=settings.circuit_cooldown_seconds,
+            )
         )
         self.registry = InvestigationRegistry()
         self.store: InvestigationStore | None = (

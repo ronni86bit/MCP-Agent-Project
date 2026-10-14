@@ -25,7 +25,7 @@ from backend.agent.models import (
 from backend.agent.state import InvestigationRecord
 from backend.config import Settings
 from backend.mcp.client_manager import MultiMCPManager, ToolInfo
-from backend.mcp.errors import ToolExecutionError
+from backend.mcp.errors import ToolExecutionError, TransportError
 from tests.scripted import MalformedLLM, RaisingLLM, ScriptedLLM
 
 OBJECT_SCHEMA = {"type": "object", "properties": {}, "additionalProperties": True}
@@ -91,17 +91,27 @@ def _scripted(selections: list, report: InvestigationReport | None = None, revie
 class StubServerManager:
     """Duck-typed per-server MCP manager: deterministic tools, payloads, failures."""
 
-    def __init__(self, tools: list[str], *, payloads: dict | None = None, fail_names: set | None = None):
+    def __init__(self, tools: list[str], *, payloads: dict | None = None, fail_names: set | None = None,
+                 extra_tools_after_refresh: list[str] | None = None):
         self.name = "stub"
         self._tools = [
             ToolInfo(name=name, description=f"{name} stub", input_schema=OBJECT_SCHEMA) for name in tools
         ]
+        self._extra = extra_tools_after_refresh or []
+        self.refresh_count = 0
         self._payloads = payloads or {}
         self._fail = set(fail_names or ())
         self.calls: list[tuple[str, dict]] = []
 
     def tools(self) -> list[ToolInfo]:
         return self._tools
+
+    async def refresh_tools(self):
+        self.refresh_count += 1
+        for name in self._extra:
+            if name not in {t.name for t in self._tools}:
+                self._tools.append(ToolInfo(name=name, description=f"{name} stub", input_schema=OBJECT_SCHEMA))
+        return self.tools()
 
     async def call_tool(self, name: str, arguments: dict):
         self.calls.append((name, arguments))
@@ -116,6 +126,7 @@ class StubMulti:
 
     def __init__(self, servers: dict[str, StubServerManager]):
         self.managers = servers
+        self.breakers: dict = {}
 
     async def __aenter__(self) -> "StubMulti":
         return self
@@ -124,7 +135,24 @@ class StubMulti:
         return False
 
     async def call_tool(self, server: str, name: str, arguments: dict):
-        return await self.managers[server].call_tool(name, arguments)
+        from backend.mcp.errors import ToolTimeoutError, TransportError
+
+        breaker = self.breakers.get(server)
+        if breaker is not None:
+            breaker.before_call()
+        try:
+            result = await self.managers[server].call_tool(name, arguments)
+        except (ToolTimeoutError, TransportError):
+            if breaker is not None:
+                breaker.record_failure()
+            raise
+        except Exception:
+            if breaker is not None:
+                breaker.record_success()
+            raise
+        if breaker is not None:
+            breaker.record_success()
+        return result
 
 
 async def _run(scripted: ScriptedLLM, manager_factory, settings: Settings | None = None) -> InvestigationRecord:
@@ -298,6 +326,101 @@ async def test_invalid_arguments_get_exactly_one_repair_attempt(pg_manager):
     repaired = [obs for obs in record.tool_calls if obs.attempt == 2]
     assert len(repaired) == 1 and repaired[0].status == "ok"
     assert record.evidence_ids == ["ev-0001"]
+
+
+async def test_unknown_tool_triggers_single_discovery_refresh_then_recovers():
+    """Phase 6: an unknown tool refreshes discovery at most once; the newly
+    discovered tool is then used — and only one refresh ever happens."""
+    servers = {
+        "postgres-mcp": StubServerManager(
+            ["get_daily_sales"],
+            extra_tools_after_refresh=["get_sales_trend"],
+        ),
+    }
+    selections = [
+        LLMToolCall(id="c1", name="postgres-mcp__get_sales_trend",
+                    arguments={"start_date": "2026-10-01", "end_date": "2026-10-05"}),
+        LLMToolCall(id="c2", name="postgres-mcp__get_sales_trend",
+                    arguments={"start_date": "2026-10-01", "end_date": "2026-10-05"}),
+    ]
+    record = await _run(_scripted(selections), lambda: StubMulti(servers))
+    assert record.status == "complete"
+    assert servers["postgres-mcp"].refresh_count == 1, "discovery refresh must happen at most once"
+    refreshed = [obs for obs in record.tool_calls if obs.error_class == "UnknownToolDiscoveryRefresh"]
+    assert len(refreshed) == 1
+    assert record.evidence_ids == ["ev-0001"]
+
+
+class TransportFailStub(StubServerManager):
+    """Fails with TransportError — an availability failure that trips breakers."""
+
+    async def call_tool(self, name: str, arguments: dict):
+        self.calls.append((name, arguments))
+        if name in self._fail:
+            raise TransportError(f"{name} unreachable", tool=name)
+        return await super().call_tool(name, arguments)
+
+
+async def test_circuit_breaker_isolates_failing_server():
+    """Phase 6: repeated availability failures open ONE server's circuit; other
+    servers stay usable and the unavailable source is explicitly reported."""
+    from backend.reliability import CircuitBreaker
+
+    servers = {
+        "postgres-mcp": StubServerManager(["get_daily_sales"]),
+        "monitoring-mcp": TransportFailStub(["get_error_rate"], fail_names={"get_error_rate"}),
+    }
+    breaker_settings = _settings(
+        circuit_failure_threshold=2, circuit_cooldown_seconds=3600,
+        max_investigation_steps=4, max_llm_calls=24,
+    )
+    plan = Plan(
+        goal="correlate sales with service health",
+        steps=[
+            PlanStep(id=1, action="daily sales", evidence_needed="totals",
+                     tool="postgres-mcp__get_daily_sales"),
+            PlanStep(id=2, action="checkout error rate", evidence_needed="errors",
+                     tool="monitoring-mcp__get_error_rate"),
+            PlanStep(id=3, action="retry service health later", evidence_needed="errors",
+                     tool="monitoring-mcp__get_error_rate"),
+            PlanStep(id=4, action="daily sales again", evidence_needed="totals",
+                     tool="postgres-mcp__get_daily_sales"),
+        ],
+        completion_criteria="done",
+    )
+    selections = [
+        _daily_call({"start_date": "2026-10-03", "end_date": "2026-10-05"}),
+        LLMToolCall(id="c2", name="monitoring-mcp__get_error_rate",
+                    arguments={"service": "checkout", "window_start": "2026-10-03", "window_end": "2026-10-05"}),
+        LLMToolCall(id="c3", name="monitoring-mcp__get_error_rate",
+                    arguments={"service": "checkout", "window_start": "2026-10-03", "window_end": "2026-10-05"}),
+        _daily_call({"start_date": "2026-10-04", "end_date": "2026-10-05"}),
+    ]
+    report = InvestigationReport(
+        conclusion="Revenue moved while service health could not be observed.",
+        claims=[
+            Claim(text="Revenue observed.", evidence_ids=["ev-0001", "ev-0002"]),
+        ],
+        confidence=Confidence.low,
+        confidence_rationale="monitoring unavailable",
+    )
+    scripted = _scripted(selections, report=report)
+    scripted.plan = plan
+    multi = StubMulti(servers)
+    multi.breakers = {
+        server: CircuitBreaker(server, failure_threshold=2, cooldown_seconds=3600)
+        for server in servers
+    }
+    record = await _run(scripted, lambda: multi, breaker_settings)
+    assert record.status == "complete"
+    # postgres kept working before and after the monitoring circuit opened
+    assert record.evidence_ids == ["ev-0001", "ev-0002"]
+    assert any("source unavailable: monitoring-mcp" in w for w in record.warnings)
+    monitoring_calls = [name for name, _ in servers["monitoring-mcp"].calls]
+    assert len(monitoring_calls) == 2, "circuit must open after 2 failures: no 3rd attempt reaches the server"
+    assert len(servers["postgres-mcp"].calls) == 2
+    circuit_errors = [obs for obs in record.tool_calls if obs.error_class == "CircuitOpenError"]
+    assert circuit_errors == [], "circuit opened exactly at the budget edge; no open-circuit call expected"
 
 
 async def test_unknown_tool_is_rejected_without_execution(pg_manager):

@@ -26,7 +26,7 @@ log = structlog.get_logger(__name__)
 # (question, expected qualified tool)
 DEFAULT_PROBES: list[tuple[str, str]] = [
     ("Show me today's sales.", "postgres-mcp__get_daily_sales"),
-    ("Compare today's revenue with the previous period.", "postgres-mcp__compare_sales"),
+    ("Compare today's revenue with yesterday's revenue.", "postgres-mcp__compare_sales"),
     ("Which region had the lowest sales?", "postgres-mcp__get_region_sales"),
     ("Show the sales trend.", "postgres-mcp__get_sales_trend"),
     ("Is the checkout service healthy right now?", "monitoring-mcp__get_error_rate"),
@@ -41,7 +41,7 @@ async def run_selection_probes(
     prompts = prompts or DEFAULT_PROBES
     catalog = ToolCatalog.from_managers(managers.managers, SERVER_ALLOWLISTS)
     store = EvidenceStore("smoke")
-    executor = Executor(managers, catalog, store)
+    executor = Executor(managers, catalog, store, SERVER_ALLOWLISTS)
     context = planner.dataset_context()
     plan = Plan(
         goal="fulfil the user's request with one tool call",

@@ -7,8 +7,10 @@ and policy engine merge into this layer in later phases.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
+import random
 import time
 from collections.abc import Callable
 from contextlib import AsyncExitStack
@@ -143,19 +145,30 @@ class MCPClientManager:
     async def start(self) -> None:
         if self._session is not None:
             return
-        stack = AsyncExitStack()
-        try:
-            read, write = await stack.enter_async_context(stdio_client(self.server_params))
-            session = await stack.enter_async_context(
-                ClientSession(read, write, read_timeout_seconds=self.session_timeout_seconds)
-            )
-            await session.initialize()
-        except BaseException as exc:
-            await stack.aclose()
-            raise TransportError(f"failed to start MCP server {self.name!r}: {exc}") from exc
-        self._stack, self._session = stack, session
-        await self.refresh_tools()
-        log.info("mcp_session_started", server=self.name, tools=sorted(self._tools))
+        # one bounded retry for transient spawn failures (flaky process start);
+        # auth/config errors fail immediately on the first attempt anyway
+        last_error: BaseException | None = None
+        for attempt in (1, 2):
+            stack = AsyncExitStack()
+            try:
+                read, write = await stack.enter_async_context(stdio_client(self.server_params))
+                session = await stack.enter_async_context(
+                    ClientSession(read, write, read_timeout_seconds=self.session_timeout_seconds)
+                )
+                await session.initialize()
+                self._stack, self._session = stack, session
+                await self.refresh_tools()
+                log.info("mcp_session_started", server=self.name, tools=sorted(self._tools),
+                         attempt=attempt)
+                return
+            except BaseException as exc:
+                await stack.aclose()
+                last_error = exc
+                if attempt == 1:
+                    await asyncio.sleep(0.75 + random.uniform(0, 0.5))
+        raise TransportError(
+            f"failed to start MCP server {self.name!r} after 2 attempts: {last_error}"
+        ) from last_error
 
     async def stop(self) -> None:
         if self._stack is None:
@@ -262,12 +275,42 @@ class MultiMCPManager:
     Servers never see each other; orchestration stays in the agent runtime.
     Tool addressing is (server, tool_name) — the catalog builds qualified
     names (`server__tool`) for the LLM on top of this.
+
+    Reliability (Phase 6): per-server token-bucket rate limiting and circuit
+    breakers gate every call; availability failures (transport, timeout)
+    trip the breaker while validation/execution errors do not (the server is
+    clearly responsive). An open circuit fails fast with CircuitOpenError —
+    'source unavailable', never silently skipped.
     """
 
-    def __init__(self, factories: dict[str, Callable[[], MCPClientManager]]):
+    def __init__(
+        self,
+        factories: dict[str, Callable[[], MCPClientManager]],
+        *,
+        rate_limits_per_minute: dict[str, int] | None = None,
+        default_rate_limit_per_minute: int = 240,
+        circuit_failure_threshold: int = 3,
+        circuit_cooldown_seconds: float = 60.0,
+    ):
+        from backend.reliability import CircuitBreaker, TokenBucket
+
         self.factories = factories
         self.managers: dict[str, MCPClientManager] = {}
         self._stack: AsyncExitStack | None = None
+        self.buckets = {
+            server: TokenBucket(
+                (rate_limits_per_minute or {}).get(server, default_rate_limit_per_minute)
+            )
+            for server in factories
+        }
+        self.breakers = {
+            server: CircuitBreaker(
+                server,
+                failure_threshold=circuit_failure_threshold,
+                cooldown_seconds=circuit_cooldown_seconds,
+            )
+            for server in factories
+        }
 
     async def __aenter__(self) -> "MultiMCPManager":
         stack = AsyncExitStack()
@@ -296,4 +339,26 @@ class MultiMCPManager:
             ) from None
 
     async def call_tool(self, server: str, name: str, arguments: dict[str, Any] | None = None) -> Any:
-        return await self.manager(server).call_tool(name, arguments)
+        manager = self.manager(server)
+        breaker = self.breakers.get(server)
+        bucket = self.buckets.get(server)
+        if breaker is not None:
+            breaker.before_call()  # CircuitOpenError when open
+        if bucket is not None:
+            waited = await bucket.acquire()
+            if waited > 0:
+                log.info("rate_limit_wait", server=server, waited_seconds=round(waited, 2))
+        try:
+            result = await manager.call_tool(name, arguments)
+        except (ToolTimeoutError, TransportError) as exc:
+            if breaker is not None:
+                breaker.record_failure()
+            raise
+        except MCPClientError:
+            # server responded (validation/execution error): it is alive
+            if breaker is not None:
+                breaker.record_success()
+            raise
+        if breaker is not None:
+            breaker.record_success()
+        return result

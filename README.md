@@ -8,7 +8,7 @@ evidence-grounded conclusions with human-approved actions.
 Canonical scenario: *"Why did today's sales drop?"* — answered by correlating sales data,
 a recent checkout deployment, rising checkout error rates, and the resulting alert/incident.
 
-**Status: Phase 5 — planning & state (persistent investigations, plan revisions, recovery, grounding checks).**
+**Status: Phase 6 — reliability (bounded retries, rate limits, circuit breakers, timeouts, partial-failure reporting).**
 (Phase 1: MCP fundamentals · Phase 2: postgres-mcp · Phase 3: agent runtime · Phase 4: multi-server correlation — complete.)
 
 - Engineering rules & architecture decisions: see [AGENTS.md](AGENTS.md).

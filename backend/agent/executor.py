@@ -24,9 +24,10 @@ log = structlog.get_logger(__name__)
 
 
 class ValidationOutcome:
-    def __init__(self, ok: bool, error: str | None = None):
+    def __init__(self, ok: bool, error: str | None = None, unknown: bool = False):
         self.ok = ok
         self.error = error
+        self.unknown = unknown  # True when the tool was not in the catalog at all
 
 
 class ExecutionOutcome:
@@ -49,16 +50,29 @@ class ExecutionOutcome:
 
 
 class Executor:
-    def __init__(self, managers: MultiMCPManager, catalog: ToolCatalog, store: EvidenceStore):
+    def __init__(self, managers: MultiMCPManager, catalog: ToolCatalog, store: EvidenceStore,
+                 allowlist: dict[str, frozenset[str]]):
         self.managers = managers
         self.catalog = catalog
         self.store = store
+        self.allowlist = allowlist
+
+    async def refresh_catalog(self) -> ToolCatalog:
+        """Re-run discovery on every server and rebuild the catalog (called at
+        most once per investigation, when a selected tool was unknown)."""
+        for manager in self.managers.managers.values():
+            await manager.refresh_tools()
+        self.catalog = ToolCatalog.from_managers(self.managers.managers, self.allowlist)
+        return self.catalog
 
     def validate(self, request: ToolCallRequest) -> ValidationOutcome:
         entry = self.catalog.resolve(request.name)
         if entry is None:
-            return ValidationOutcome(False, f"unknown tool {request.name!r} (not offered by any configured server)")
-        if not entry.allowlisted:
+            return ValidationOutcome(
+                False, f"unknown tool {request.name!r} (not offered by any configured server)",
+                unknown=True,
+            )
+        if entry is not None and not entry.allowlisted:
             return ValidationOutcome(
                 False,
                 f"tool {request.name!r} on {entry.server} is outside the policy allowlist "

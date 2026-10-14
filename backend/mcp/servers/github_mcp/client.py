@@ -53,7 +53,12 @@ class GitHubClient:
         }
         if token:
             headers["Authorization"] = f"Bearer {token}"
-        self._client = httpx.AsyncClient(base_url=self._base, headers=headers, timeout=timeout_seconds)
+        # explicit connect/read/write/pool budget instead of one flat timeout
+        self._client = httpx.AsyncClient(
+            base_url=self._base,
+            headers=headers,
+            timeout=httpx.Timeout(connect=5.0, read=timeout_seconds, write=10.0, pool=5.0),
+        )
 
     async def aclose(self) -> None:
         await self._client.aclose()

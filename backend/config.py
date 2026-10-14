@@ -19,6 +19,13 @@ class Settings(BaseSettings):
     # on the dev machine); synthesis-sized calls need generous timeouts.
     llm_timeout_seconds: float = 600.0
 
+    # Phase 6 — reliability knobs (all bounded; nothing retries indefinitely).
+    llm_retry_attempts: int = 1          # EXTRA attempts for transient provider errors
+    llm_retry_backoff_seconds: float = 2.0
+    circuit_failure_threshold: int = 3   # consecutive availability failures -> open
+    circuit_cooldown_seconds: float = 60.0
+    rate_limit_per_server_per_minute: int = 240
+
     # Investigation loop bounds — the loop is never unbounded.
     max_investigation_steps: int = 8
     max_plan_steps: int = 4

@@ -7,7 +7,13 @@ from backend.agent.models import InvestigationReport, Plan
 
 
 async def synthesize(
-    llm: LLMClient, question: str, plan: Plan, evidence_digest: str, *, max_tokens: int = 700
+    llm: LLMClient,
+    question: str,
+    plan: Plan,
+    evidence_digest: str,
+    *,
+    unavailable_sources: list[str] | None = None,
+    max_tokens: int = 700,
 ) -> InvestigationReport:
     system = (
         "You write the final report of a multi-system operations investigation. "
@@ -27,7 +33,13 @@ async def synthesize(
     user = (
         f"Question: {question}\n\nPlan: {plan.model_dump_json()}\n\n"
         f"Evidence records:\n{evidence_digest}\n\n"
-        "Return JSON with fields: conclusion (string), claims (list of {text, evidence_ids}), "
+        + (
+            "Sources UNAVAILABLE during this investigation (they produced no evidence; "
+            "never fabricate findings from them): "
+            + ", ".join(unavailable_sources) + "\n\n"
+            if unavailable_sources else ""
+        )
+        + "Return JSON with fields: conclusion (string), claims (list of {text, evidence_ids}), "
         "confidence (\"high\"|\"medium\"|\"low\"), confidence_rationale (string), "
         "caveats (list of strings), evidence_gaps (list of strings)."
     )

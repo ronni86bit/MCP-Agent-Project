@@ -121,7 +121,7 @@ async def test_unparseable_tool_arguments_are_preserved_for_repair():
 
 async def test_connection_refused_maps_to_provider_unavailable():
     provider = MockProvider()
-    provider.route(CHAT_PATH, [httpx2.ConnectError("refused")])
+    provider.route(CHAT_PATH, [httpx2.ConnectError("refused"), httpx2.ConnectError("refused")])
     with pytest.raises(ProviderUnavailableError):
         await provider.adapter().chat_with_tools([LLMMessage(role="user", content="q")], [])
 

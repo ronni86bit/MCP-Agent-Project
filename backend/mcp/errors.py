@@ -35,3 +35,11 @@ class ToolExecutionError(MCPClientError):
 
 class TransportError(MCPClientError):
     """The MCP session/transport failed (server crashed, pipe closed, protocol error)."""
+
+
+class CircuitOpenError(MCPClientError):
+    """The dependency's circuit breaker is open; the call was not attempted.
+
+    Counts as 'source unavailable': distinct from tool failure and from
+    'no results found', and must be reported as an explicit evidence gap.
+    """

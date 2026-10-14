@@ -30,6 +30,7 @@ from backend.agent.verifier import verify
 from backend.config import Settings
 from backend.mcp.client_manager import MultiMCPManager
 from backend.mcp.errors import MCPClientError
+from backend.reliability import CircuitState
 
 log = structlog.get_logger(__name__)
 
@@ -120,8 +121,9 @@ class InvestigationLoop:
             tools=len(catalog.names()),
         )
 
-        executor = Executor(managers, catalog, self.evidence)
+        executor = Executor(managers, catalog, self.evidence, self.allowlist)
         attempted: set[tuple[int, int]] = set()  # (plan_version, plan_step_id)
+        self._discovery_refreshed = False
 
         while True:
             if self._finished_early:
@@ -157,6 +159,14 @@ class InvestigationLoop:
             await self._maybe_revise(plan, attempted)
 
         record.states_visited.append("correlate")
+        # a source whose circuit is open is REPORTED unavailable — distinct
+        # from 'tool failed' and from 'no results found'
+        unavailable = sorted(
+            server for server, breaker in managers.breakers.items()
+            if breaker.state != CircuitState.closed
+        )
+        if unavailable:
+            record.warnings.append("source unavailable: " + ", ".join(unavailable))
         # compact digest: the synthesis turn (and its repair turn) must fit a
         # small default context window plus the max_tokens output budget
         digest = self.evidence.digest(max_chars=1100)
@@ -169,8 +179,18 @@ class InvestigationLoop:
             self._fail("LLM call budget exhausted before synthesis")
             return
         report = await self._llm_call(
-            "synthesize", synthesizer.synthesize(self.llm, record.question, record.plan, digest)
+            "synthesize",
+            synthesizer.synthesize(
+                self.llm, record.question, record.plan, digest, unavailable_sources=unavailable
+            ),
         )
+        if unavailable:
+            report = report.model_copy(
+                update={
+                    "evidence_gaps": report.evidence_gaps
+                    + [f"source unavailable (no evidence collected): {server}" for server in unavailable]
+                }
+            )
         verified, result = verify(report, self.evidence)
         record.report = verified
         record.verification = result
@@ -229,6 +249,30 @@ class InvestigationLoop:
                 return
 
             validation = executor.validate(request)
+            if not validation.ok and attempt == 1 and validation.unknown and not self._discovery_refreshed:
+                # Phase 6: unknown tool -> refresh discovery at most ONCE, then
+                # reselect; the refresh consumes this attempt's retry slot
+                self._discovery_refreshed = True
+                record.states_visited.append("validate")
+                record.tool_calls.append(
+                    ToolCallObservation(
+                        step=plan_step.id, tool=request.name, arguments=request.arguments,
+                        attempt=attempt, status="error", error_class="UnknownToolDiscoveryRefresh",
+                        error=validation.error,
+                    )
+                )
+                await self._checkpoint("discovery_refreshed")
+                log.warning(
+                    "unknown_tool_discovery_refresh",
+                    investigation_id=record.investigation_id,
+                    tool=request.name,
+                    action="refresh_catalog_once",
+                )
+                refreshed = await executor.refresh_catalog()
+                self._llm_tools = refreshed.to_llm_tools()
+                repair_feedback = "discovery was refreshed; choose a tool that now exists"
+                continue
+
             if not validation.ok and attempt == 1:
                 repair_feedback = validation.error
                 record.states_visited.append("validate")
