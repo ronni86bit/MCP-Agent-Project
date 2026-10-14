@@ -8,8 +8,8 @@ evidence-grounded conclusions with human-approved actions.
 Canonical scenario: *"Why did today's sales drop?"* — answered by correlating sales data,
 a recent checkout deployment, rising checkout error rates, and the resulting alert/incident.
 
-**Status: Phase 4 — multi-server MCP + cross-system correlation (monitoring-mcp, github-mcp).**
-(Phase 1: MCP fundamentals · Phase 2: postgres-mcp + seeded business data · Phase 3: agent runtime — complete.)
+**Status: Phase 5 — planning & state (persistent investigations, plan revisions, recovery, grounding checks).**
+(Phase 1: MCP fundamentals · Phase 2: postgres-mcp · Phase 3: agent runtime · Phase 4: multi-server correlation — complete.)
 
 - Engineering rules & architecture decisions: see [AGENTS.md](AGENTS.md).
 - Project guide: `MCP_Tool_Using_Production_Agent_Project_Guide.docx`.
@@ -125,8 +125,33 @@ ALT-2071 → incident INC-1042 → mobile-channel sales collapse 10-03..10-05.
 ```bash
 uv run python scripts/seed_monitoring.py    # materialize monitoring fixtures as JSON
 uv run python scripts/model_smoke.py        # 6 selection probes across all three servers
+uv run python scripts/persistence_demo.py   # persistence + restart-recovery demo
 uv run python scripts/agent_demo.py         # canonical cross-system investigation
 ```
+
+## Phase 5 — Planning & state
+
+Investigations persist to PostgreSQL (`agent_state` schema, versioned initialization,
+logically separate from the `sales_data` business schema): investigation records, per-version
+plans, steps, tool calls, evidence, reports, and an append-only event log. The API's
+`GET /api/investigations/{id}` returns persisted state — retrieval survives backend restarts.
+
+- **Plan lifecycle:** plans are versioned; a post-step reviewer (bounded by `MAX_PLAN_REVISIONS`)
+  may adopt a revised plan when evidence changes direction. Previous versions are preserved
+  and never silently discarded; collected evidence always survives a revision.
+- **Recovery:** on startup, investigations still marked `running` become `interrupted`, and
+  tool calls recorded mid-flight become `unknown` — uncertain external operations are never
+  re-executed blindly. (Resuming execution in-flight is deferred to Phase 6.)
+- **Grounding:** the verifier now also runs deterministic checks — every percentage/currency
+  figure and every quoted or multi-word named entity in a claim must be locatable in the
+  cited evidence, else the claim is flagged with confidence capped and an explicit caveat.
+  This narrows but does not solve semantic grounding (Phase 9).
+- **Forward design:** an `approvals` table exists in the state schema so Phase 7's
+  approval-gated actions have a home (nothing writes to it yet).
+
+Compatible API changes (additive): investigation `status` may now be `interrupted`; step
+statuses use `pending|running|completed|failed|skipped`; responses include `plan_version`,
+`plan_history`, `stage`, and full `evidence` records.
 
 GitHub configuration (optional): set `GITHUB_TOKEN` (fine-grained, read-only) and
 `GITHUB_REPO` in `.env`. Without a token, public repositories work unauthenticated at lower

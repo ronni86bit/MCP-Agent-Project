@@ -30,12 +30,13 @@ def main() -> int:
         ("phase1-demo", [sys.executable, "scripts/toy_client_demo.py"]),
         ("phase2-postgres-demo", [sys.executable, "scripts/postgres_demo.py"]),
         ("model-smoke", [sys.executable, "scripts/model_smoke.py"]),
-        ("phase4-agent-demo", [sys.executable, "scripts/agent_demo.py"]),
+        ("phase5-state-demo", [sys.executable, "scripts/persistence_demo.py"]),
+        ("agent-demo", [sys.executable, "scripts/agent_demo.py"]),
     ]
     for label, cmd in checks:
         if run(label, cmd) != 0:
             return 1
-    print("\nPHASE GATE PASSED (Phases 1-4)")
+    print("\nPHASE GATE PASSED (Phases 1-5)")
     return 0
 
 

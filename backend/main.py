@@ -17,9 +17,11 @@ from backend.config import get_settings
 def create_app(service: AgentService | None = None) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI):
-        app.state.service = service or AgentService(get_settings())
+        svc = service or AgentService(get_settings())
+        app.state.service = svc
+        await svc.startup()
         yield
-        await app.state.service.shutdown()
+        await svc.shutdown()
 
     app = FastAPI(title="AI Operations Investigation Agent", version="0.3.0", lifespan=lifespan)
     app.include_router(routes.router)

@@ -30,7 +30,9 @@ def _describe(spec: ScenarioSpec) -> str:
         f"Dataset: daily sales (orders/units/revenue) by product, region, and channel, "
         f"covering {spec.start_date} through {spec.end_date} (inclusive). "
         f"'today' refers to {spec.end_date} unless the question names another date. "
-        f"A known-healthy baseline window is {spec.baseline.start_date}..{spec.baseline.end_date}."
+        f"A known-healthy baseline window is {spec.baseline.start_date}..{spec.baseline.end_date}. "
+        f"Monitored services (use these exact names with monitoring-mcp tools): "
+        f"{', '.join(spec.monitoring.services)}."
     )
 
 
@@ -41,6 +43,10 @@ async def understand(llm: LLMClient, question: str, context: str) -> Understandi
     ]
     understanding, _ = await llm.complete_structured(messages, Understanding, max_tokens=400)
     return understanding
+
+
+def _systems_used(plan: Plan) -> set[str]:
+    return {step.tool.split("__", 1)[0] for step in plan.steps if step.tool}
 
 
 async def make_plan(
@@ -55,20 +61,51 @@ async def make_plan(
         f"You may only use these tools: {', '.join(tool_names)}. "
         "The tools come from three systems: postgres-mcp (business/sales data), monitoring-mcp "
         "(service health: error rates, alerts, incidents), and github-mcp (commits, deployments, "
-        "issues). For 'why did X happen' questions, plan steps that check every relevant system — "
-        "a business decline usually needs the sales numbers AND service health AND recent "
+        "issues). For 'why did X happen' questions, the plan MUST draw on at least two different "
+        "systems — a business decline needs the sales numbers AND service health AND recent "
         "software changes before a confident answer is possible. "
         f"Produce at most {settings.max_plan_steps} steps; prefer the fewest steps that answer the "
         "question — each step is exactly one tool call, and redundant repeats waste the budget. "
         "When a step compares two windows, they must span the same number of days. "
-        "Steps are executed in order; later steps may use earlier evidence."
+        "Steps are executed in order; later steps may use earlier evidence. "
+        "Each step MUST name the exact tool it will call in its tool field (use the exact "
+        "qualified names from the tool list)."
     )
     user = (
         f"Question: {question}\n\nUnderstanding: {understanding.model_dump_json()}\n\n"
         f"Dataset context: {dataset_context()}\n\n"
-        "Return a plan: goal, steps (each with id, action, evidence_needed), "
+        "Return a plan: goal, steps (each with id, action, evidence_needed, tool), "
         "expected_evidence, completion_criteria."
     )
+    plan = await await_llm_plan(llm, system, user, settings)
+
+    # Deterministic coverage gate: a 'why' investigation whose named tools all
+    # come from one system gets exactly one corrective re-plan (the model may
+    # still decide a single system suffices, and the reviewer may revise later).
+    why_question = "why" in question.lower()
+    if (
+        why_question
+        and plan.steps
+        and all(step.tool for step in plan.steps)
+        and len(_systems_used(plan)) < 2
+    ):
+        log.warning("plan_single_system", systems=sorted(_systems_used(plan)), re_planning=True)
+        plan = await await_llm_plan(
+            llm,
+            system,
+            "\n".join(
+                [user, plan.model_dump_json(),
+                 "Your plan only uses one system. Revise it to include at least one step from "
+                 "monitoring-mcp (service health) and one from github-mcp (recent changes)."],
+            ),
+            settings,
+        )
+        if all(step.tool for step in plan.steps) and len(_systems_used(plan)) < 2:
+            log.warning("plan_single_system_accepted", systems=sorted(_systems_used(plan)))
+    return plan
+
+
+async def await_llm_plan(llm: LLMClient, system: str, user: str, settings: Settings) -> Plan:
     plan, _ = await llm.complete_structured(
         [LLMMessage(role="system", content=system), LLMMessage(role="user", content=user)],
         Plan,

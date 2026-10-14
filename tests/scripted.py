@@ -1,7 +1,8 @@
 """Deterministic LLM test double implementing the adapter interface.
 
 Selections are queued LLMToolCall objects; structured outputs are returned by
-schema type. `MalformedLLM` and `RaisingLLM` cover failure paths.
+schema type (with a scripted plan-review queue); MalformedLLM/RaisingLLM cover
+failure paths.
 """
 
 from __future__ import annotations
@@ -9,7 +10,13 @@ from __future__ import annotations
 from pydantic import BaseModel
 
 from backend.agent.llm.adapter import LLMClient, LLMMessage, LLMResponse
-from backend.agent.models import InvestigationReport, Plan, PlanStep, Understanding
+from backend.agent.models import (
+    InvestigationReport,
+    Plan,
+    PlanReviewDecision,
+    PlanStep,
+    Understanding,
+)
 
 
 class ScriptedLLM(LLMClient):
@@ -21,12 +28,15 @@ class ScriptedLLM(LLMClient):
         plan: Plan,
         selections: list,
         report: InvestigationReport,
+        reviews: list[PlanReviewDecision] | None = None,
     ):
         self.understanding = understanding
         self.plan = plan
         self.selections = list(selections)
         self.report = report
+        self.reviews = list(reviews or [])
         self.select_calls = 0
+        self.review_calls = 0
         self.last_messages: list[LLMMessage] | None = None
         self.last_tools: list[dict] | None = None
 
@@ -40,6 +50,10 @@ class ScriptedLLM(LLMClient):
             return self.understanding, LLMResponse(model=self.model_name)
         if schema_model is Plan:
             return self.plan, LLMResponse(model=self.model_name)
+        if schema_model is PlanReviewDecision:
+            self.review_calls += 1
+            decision = self.reviews.pop(0) if self.reviews else PlanReviewDecision(action="continue")
+            return decision, LLMResponse(model=self.model_name)
         if schema_model is InvestigationReport:
             return self.report, LLMResponse(model=self.model_name)
         raise AssertionError(f"unexpected schema model {schema_model.__name__}")

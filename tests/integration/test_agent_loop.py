@@ -55,7 +55,7 @@ def _daily_call(step_args: dict | None = None) -> LLMToolCall:
     )
 
 
-def _scripted(selections: list, report: InvestigationReport | None = None) -> ScriptedLLM:
+def _scripted(selections: list, report: InvestigationReport | None = None, reviews: list | None = None) -> ScriptedLLM:
     return ScriptedLLM(
         understanding=Understanding(
             goal="explain the sales drop",
@@ -84,6 +84,7 @@ def _scripted(selections: list, report: InvestigationReport | None = None) -> Sc
             confidence=Confidence.medium,
             confidence_rationale="several independent tool results agree",
         ),
+        reviews=reviews,
     )
 
 
@@ -149,7 +150,7 @@ async def test_single_tool_investigation_is_grounded(pg_manager):
     assert record.status == "complete"
     assert record.plan is not None and record.understanding is not None
     assert record.evidence_ids == ["ev-0001"]
-    assert record.steps[0].status == "ok"
+    assert record.steps[0].status == "completed"
     assert record.report is not None
     assert record.verification is not None and record.verification.ok
     for claim in record.report.claims:
@@ -176,8 +177,58 @@ async def test_multi_step_investigation_accumulates_evidence(pg_manager):
     record = await _run(_scripted(selections), _pg_multi(pg_manager))
     assert record.status == "complete"
     assert record.evidence_ids == ["ev-0001", "ev-0002", "ev-0003"]
-    assert all(step.status == "ok" for step in record.steps[:3])
-    assert record.llm_calls == 6  # understand + plan + 3 selections + synthesis
+    assert all(step.status == "completed" for step in record.steps[:3])
+    # understand + plan + 3 selections + 2 post-step reviews + synthesis
+    assert record.llm_calls == 8
+
+
+async def test_plan_revision_preserves_evidence_and_history():
+    """Phase 5: a post-step review revises the plan; the old version stays in
+    history and previously collected evidence is untouched."""
+    from backend.agent.models import PlanReviewDecision
+
+    servers = {
+        "postgres-mcp": StubServerManager(["get_daily_sales"]),
+        "monitoring-mcp": StubServerManager(
+            ["get_error_rate"],
+            payloads={"get_error_rate": {"service": "checkout", "summary": {"window_avg_pct": 9.4}, "count": 0}},
+        ),
+    }
+    revised = Plan(
+        goal="shift to service health",
+        steps=[PlanStep(id=1, action="check checkout error rate", evidence_needed="error rates")],
+        expected_evidence=["error rates"],
+        completion_criteria="service health explained",
+    )
+    selections = [
+        _daily_call({"start_date": "2026-10-05", "end_date": "2026-10-05"}),
+        LLMToolCall(
+            id="c2",
+            name="monitoring-mcp__get_error_rate",
+            arguments={"service": "checkout", "window_start": "2026-10-03", "window_end": "2026-10-05"},
+        ),
+    ]
+    scripted = _scripted(
+        selections,
+        reviews=[
+            PlanReviewDecision(
+                action="revise",
+                revision_reason="sales totals already establish the drop; check service health next",
+                plan=revised,
+            )
+        ],
+    )
+    record = await _run(scripted, lambda: StubMulti(servers))
+    assert record.status == "complete"
+    assert record.plan_version == 2
+    assert [info.version for info in record.plan_history] == [1, 2]
+    assert record.plan_history[0].superseded is True
+    assert record.plan_history[0].plan.steps[0].action.startswith("establish daily sales")
+    assert record.plan.steps[0].action == "check checkout error rate"
+    assert record.evidence_ids == ["ev-0001", "ev-0002"], "evidence survived the revision"
+    assert record.evidence[0].server == "postgres-mcp"
+    assert record.evidence[1].server == "monitoring-mcp"
+    assert any("plan revised to version 2" in w for w in record.warnings)
 
 
 async def test_cross_system_evidence_spans_three_servers():
@@ -269,7 +320,8 @@ async def test_step_limit_bounds_the_loop():
     )
     assert record.status == "complete"
     assert len(record.steps) == 2
-    assert record.llm_calls <= 2 + 3  # selections + understand/plan/synthesis
+    # understand + plan + 2 selections + up to 2 post-step reviews + synthesis
+    assert record.llm_calls <= 3 + 2 + 2
 
 
 async def test_tool_failure_is_recorded_then_recovered_via_next_step():

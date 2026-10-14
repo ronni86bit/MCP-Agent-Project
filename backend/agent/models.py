@@ -1,10 +1,16 @@
-"""Typed models crossing agent-runtime boundaries (LLM output, reports, records)."""
+"""Typed models crossing agent-runtime boundaries (LLM output, reports, records).
+
+Step status taxonomy: pending | running | completed | failed | skipped.
+Tool-call status: running | ok | error | unknown (unknown = interrupted before
+completion; never re-executed blindly). Investigation status:
+running | complete | failed | interrupted.
+"""
 
 from __future__ import annotations
 
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -26,6 +32,9 @@ class PlanStep(BaseModel):
     id: int = Field(ge=1)
     action: str = Field(min_length=3, max_length=400)
     evidence_needed: str = Field(min_length=1, max_length=300)
+    tool: str = Field(default="", max_length=160)  # qualified tool name the step will call
+    status: Literal["pending", "running", "completed", "failed", "skipped"] = "pending"
+    depends_on: list[int] = Field(default_factory=list, max_length=6)
 
 
 class Plan(BaseModel):
@@ -37,10 +46,19 @@ class Plan(BaseModel):
     completion_criteria: str = Field(min_length=1, max_length=500)
 
 
+class PlanReviewDecision(BaseModel):
+    """Post-step review output: continue, or revise the remaining plan."""
+
+    action: Literal["continue", "revise"] = "continue"
+    # generous cap: local models ramble; the loop truncates at consumption points
+    revision_reason: str = Field(default="", max_length=1200)
+    plan: Plan | None = None
+
+
 class ToolCallRequest(BaseModel):
     """A tool the model selected, with arguments awaiting validation."""
 
-    name: str = Field(min_length=1, max_length=120)
+    name: str = Field(min_length=1, max_length=160)
     arguments: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -71,18 +89,26 @@ class InvestigationReport(BaseModel):
 
 
 class VerificationResult(BaseModel):
-    """Deterministic verifier output over a synthesized report."""
+    """Deterministic verifier output over a synthesized report.
+
+    grounding_checked=True means the deterministic value/entity checks ran
+    (id existence is always checked). This is NOT general semantic grounding.
+    """
 
     ok: bool = True
     dropped_claims: list[str] = Field(default_factory=list)
+    flagged_claims: list[str] = Field(default_factory=list)
     downgraded: bool = False
+    grounding_checked: bool = False
     notes: list[str] = Field(default_factory=list)
 
 
 class StepRecord(BaseModel):
     index: int
+    plan_version: int = 1
+    plan_step_id: int | None = None
     action: str = ""
-    status: str = "pending"  # pending | ok | failed | skipped
+    status: Literal["pending", "running", "completed", "failed", "skipped"] = "pending"
     evidence_ids: list[str] = Field(default_factory=list)
 
 
@@ -91,9 +117,16 @@ class ToolCallObservation(BaseModel):
     tool: str
     arguments: dict[str, Any] = Field(default_factory=dict)
     attempt: int = 1  # 1 = first selection, 2 = repair/reselection
-    status: str = "ok"  # ok | error
+    status: Literal["running", "ok", "error", "unknown"] = "running"
     error_class: str | None = None
     error: str | None = None
     duration_ms: float = 0.0
     evidence_id: str | None = None
     at: datetime = Field(default_factory=_utcnow)
+
+
+class PlanVersionInfo(BaseModel):
+    version: int
+    plan: Plan
+    revision_reason: str = ""
+    superseded: bool = False

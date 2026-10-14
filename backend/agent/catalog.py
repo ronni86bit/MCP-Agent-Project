@@ -188,6 +188,10 @@ def _slim_parameters(schema: dict, depth: int = 0) -> dict:
 
 def _slim_property(spec: dict, depth: int) -> dict:
     prop = {key: spec[key] for key in _KEEP_KEYS if key in spec}
+    # short field hints: the local model guesses argument usage without them,
+    # and schema-invalid arguments cost a whole repair attempt
+    if "description" in spec:
+        prop["description"] = spec["description"][:48]
     if isinstance(prop.get("items"), dict):
         prop["items"] = _slim_parameters(prop["items"], depth + 1)
     return prop

@@ -73,6 +73,41 @@ async def test_invalid_question_is_rejected(client):
     assert response.status_code == 422
 
 
+async def test_investigation_survives_backend_restart(pg_manager):
+    """Phase 5: a finished investigation must be retrievable by a brand-new
+    service instance (registry empty, state loaded from PostgreSQL)."""
+    from backend.agent.service import AgentService as _S
+
+    settings = Settings(max_investigation_seconds=90, max_llm_calls=16)
+    factory = lambda: MultiMCPManager({"postgres-mcp": lambda: pg_manager()})  # noqa: E731
+
+    service1 = AgentService(settings, llm=_scripted([_daily_call()]), manager_factory=factory)
+    app1 = create_app(service=service1)
+    async with app1.router.lifespan_context(app1):
+        transport = httpx.ASGITransport(app=app1)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            created = await client.post("/api/investigations", json={"question": "Why did today's sales drop?"})
+            investigation_id = created.json()["investigation_id"]
+            deadline = asyncio.get_event_loop().time() + 60
+            while asyncio.get_event_loop().time() < deadline:
+                await asyncio.sleep(0.1)
+                payload = (await client.get(f"/api/investigations/{investigation_id}")).json()
+                if payload["status"] != "running":
+                    break
+            assert payload["status"] == "complete"
+    await service1.shutdown()
+
+    service2 = _S(settings, llm=_scripted([_daily_call()]), manager_factory=factory)
+    app2 = create_app(service=service2)
+    try:  # registry is empty in the new process; retrieval must hit the store
+        record = await service2.get_investigation(investigation_id)
+        assert record is not None
+        assert record.status == "complete"
+        assert record.report is not None and record.evidence_ids
+    finally:
+        await service2.shutdown()
+
+
 async def test_unknown_investigation_is_404(client):
     response = await client.get("/api/investigations/inv-does-not-exist")
     assert response.status_code == 404

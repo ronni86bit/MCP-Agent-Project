@@ -31,7 +31,7 @@ async def create_investigation(
 async def get_investigation(
     investigation_id: str, service: AgentService = Depends(get_service)
 ) -> dict:
-    record = service.registry.get(investigation_id)
+    record = await service.get_investigation(investigation_id)
     if record is None:
         raise HTTPException(status_code=404, detail=f"unknown investigation {investigation_id!r}")
     return record.dict_for_api()

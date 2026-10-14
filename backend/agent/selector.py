@@ -11,8 +11,11 @@ from backend.agent.models import Plan, ToolCallRequest
 
 
 def _compact_plan(plan: Plan) -> str:
-    """Steps only (id + action) — the full plan model wastes context."""
-    steps = "; ".join(f"{step.id}) {step.action}" for step in plan.steps)
+    """Steps with their named tools — compact but unambiguous."""
+    steps = "; ".join(
+        f"{step.id}) {step.action}" + (f" [{step.tool}]" if step.tool else "")
+        for step in plan.steps
+    )
     return f"goal: {plan.goal} | steps: {steps}"
 
 

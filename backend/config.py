@@ -22,6 +22,7 @@ class Settings(BaseSettings):
     # Investigation loop bounds — the loop is never unbounded.
     max_investigation_steps: int = 8
     max_plan_steps: int = 4
+    max_plan_revisions: int = 2
     max_llm_calls: int = 16
     max_investigation_seconds: float = 1200.0
 

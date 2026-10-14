@@ -17,6 +17,7 @@ import structlog
 from backend.agent.catalog import SERVER_ALLOWLISTS
 from backend.agent.llm.adapter import LLMClient, LLMError, OpenAICompatLLM
 from backend.agent.loop import InvestigationLoop
+from backend.agent.persistence.store import InvestigationStore
 from backend.agent.state import InvestigationRecord, InvestigationRegistry
 from backend.config import Settings
 from backend.mcp.client_manager import MCPClientManager, MultiMCPManager
@@ -53,6 +54,7 @@ class AgentService:
         manager_factory: Callable[[], MultiMCPManager] | None = None,
         server_factories: dict[str, Callable[[], MCPClientManager]] | None = None,
         allowlist: dict[str, frozenset[str]] = SERVER_ALLOWLISTS,
+        store: InvestigationStore | None = None,
     ):
         self.settings = settings
         self.llm = llm or OpenAICompatLLM(
@@ -68,7 +70,36 @@ class AgentService:
             lambda: MultiMCPManager(self._server_factories)
         )
         self.registry = InvestigationRegistry()
+        self.store: InvestigationStore | None = (
+            store if store is not None else InvestigationStore()
+        )
         self._tasks: set[asyncio.Task] = set()
+
+    async def startup(self) -> None:
+        """Initialize the state schema and conservatively resolve anything a
+        restart left half-finished (running -> interrupted, running tool
+        calls -> unknown). Never blocks app start on a down database."""
+        if self.store is None:
+            return
+        try:
+            version = await self.store.ensure_schema()
+            interrupted = await self.store.mark_interrupted()
+            log.info("state_store_ready", schema_version=version, interrupted=interrupted)
+        except Exception as exc:
+            log.warning("state_store_unavailable", error=str(exc)[:200])
+            self.store = None  # degrade to in-memory operation
+
+    async def get_investigation(self, investigation_id: str) -> InvestigationRecord | None:
+        """Live record first, persisted record second (survives restarts)."""
+        record = self.registry.get(investigation_id)
+        if record is not None:
+            return record
+        if self.store is not None:
+            try:
+                return await self.store.load_investigation(investigation_id)
+            except Exception as exc:
+                log.warning("state_store_load_failed", error=str(exc)[:200])
+        return None
 
     def start_investigation(self, question: str) -> InvestigationRecord:
         record = self.registry.create(question)
@@ -89,6 +120,7 @@ class AgentService:
             record=record,
             settings=self.settings,
             allowlist=self.allowlist,
+            state_store=self.store,
         )
         result = await loop.run()
         if result.status == "running":  # loop.run() always finalizes; belt for regressions
@@ -126,3 +158,8 @@ class AgentService:
             task.cancel()
         if self._tasks:
             await asyncio.gather(*self._tasks, return_exceptions=True)
+        if self.store is not None:
+            try:
+                await self.store.close()
+            except Exception as exc:
+                log.warning("state_store_close_failed", error=str(exc)[:200])

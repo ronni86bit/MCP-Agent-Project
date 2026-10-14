@@ -1,11 +1,19 @@
 """VERIFY: deterministic grounding checks over the synthesized report.
 
-Phase 3 scope only: references exist, claims carry evidence, required fields
-present, confidence not overstated, and causal language downgraded to
-correlation wording. Full anti-causation evaluation belongs to Phase 9.
+Phase 5 scope: evidence-ID existence, provenance preservation, and
+DETERMINISTIC value/entity checks — every percentage and currency figure and
+every quoted or multi-word capitalized entity in a claim must be locatable in
+the claim's cited evidence summaries, or the claim is flagged and confidence
+is capped. This narrows (but does NOT solve) semantic grounding: claims whose
+numbers are derived rather than quoted can still slip through; comprehensive
+evaluation belongs to Phase 9. `verify()` stays the single entry point so
+stronger checkers can be added there.
 """
 
 from __future__ import annotations
+
+import json
+import re
 
 from backend.agent.evidence import EvidenceStore
 from backend.agent.models import Confidence, InvestigationReport, VerificationResult
@@ -25,6 +33,58 @@ _CAUTIOUS_HINT = (
     "Sales data alone cannot prove causation; phrase findings as 'consistent with', "
     "'likely contributor', or 'correlated with'."
 )
+_VALUE_RE = re.compile(r"\d+(?:\.\d+)?%|\$\d[\d,]*(?:\.\d+)?")
+_QUOTED_RE = re.compile(r"\"([^\"]{3,60})\"")
+_ENTITY_RE = re.compile(r"\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)+)\b")
+
+
+def _normalized(text: str) -> str:
+    return text.replace(",", "").lower()
+
+
+_NUMBER_RE = re.compile(r"-?\d+(?:\.\d+)?")
+
+
+def _unsupported_tokens(claim_text: str, corpus: str) -> list[str]:
+    """Value and entity tokens in the claim that appear nowhere in the corpus.
+
+    Numbers are compared by numeric value (sign, percent suffix, and thousand
+    separators ignored), so a claim's "31%" matches evidence "-31.0".
+    """
+    corpus_norm = _normalized(corpus)
+    corpus_numbers: set[float] = set()
+    for match in _NUMBER_RE.findall(corpus_norm):
+        try:
+            # magnitudes: a claim's "31%" may come from evidence "delta_pct: -31.0"
+            corpus_numbers.add(round(abs(float(match)), 4))
+        except ValueError:  # pragma: no cover
+            continue
+    missing: list[str] = []
+    for token in _VALUE_RE.findall(claim_text):
+        number = _NUMBER_RE.search(token.replace(",", ""))
+        try:
+            claim_number = round(abs(float(number.group(0))), 4) if number else None
+        except ValueError:  # pragma: no cover
+            claim_number = None
+        if claim_number is None or claim_number not in corpus_numbers:
+            missing.append(token)
+    for quoted in _QUOTED_RE.findall(claim_text):
+        if _normalized(quoted) not in corpus_norm:
+            missing.append(f"\"{quoted}\"")
+    for entity in _ENTITY_RE.findall(claim_text):
+        if _normalized(entity) not in corpus_norm:
+            missing.append(entity)
+    return missing
+
+
+def _claim_corpus(claim_evidence_ids: list[str], store: EvidenceStore) -> str:
+    parts = []
+    for ref in claim_evidence_ids:
+        item = store.get(ref)
+        if item is not None:
+            parts.append(json.dumps(item.summary, default=str))
+            parts.append(json.dumps(item.arguments, default=str))
+    return " ".join(parts)
 
 
 def verify(report: InvestigationReport, store: EvidenceStore) -> tuple[InvestigationReport, VerificationResult]:
@@ -59,6 +119,34 @@ def verify(report: InvestigationReport, store: EvidenceStore) -> tuple[Investiga
         notes.append("causal language downgraded")
 
     cited = {ref for claim in kept_claims for ref in claim.evidence_ids}
+
+    # Deterministic value/entity grounding: percentages, currency amounts,
+    # quoted strings, and multi-word capitalized entities in a claim must be
+    # locatable in the cited evidence, else the claim is flagged (kept, but
+    # confidence is capped and the gap is explicit).
+    flagged: list[str] = []
+    grounding_notes: list[str] = []
+    for claim in kept_claims:
+        corpus = _claim_corpus(claim.evidence_ids, store)
+        if not corpus:
+            continue
+        missing = _unsupported_tokens(claim.text, corpus)
+        if missing:
+            flagged.append(claim.text)
+            grounding_notes.append(
+                f"claim cites {claim.evidence_ids} but these values/entities are not in that "
+                f"evidence: {missing}"
+            )
+    if flagged:
+        downgraded = True
+        if confidence == Confidence.high:
+            confidence = Confidence.medium
+        caveats.append(
+            "Deterministic grounding check flagged claims whose figures/entities could not be "
+            "located in the cited evidence; treat those figures as unverified."
+        )
+        gaps.append(f"{len(flagged)} claim(s) flagged by value/entity grounding checks")
+
     if confidence == Confidence.high and (len(kept_claims) < 2 or len(cited) < 2):
         downgraded = True
         confidence = Confidence.medium
@@ -82,7 +170,12 @@ def verify(report: InvestigationReport, store: EvidenceStore) -> tuple[Investiga
             }
         )
         result = VerificationResult(
-            ok=False, dropped_claims=dropped, downgraded=True, notes=notes or ["report unsupported"]
+            ok=False,
+            dropped_claims=dropped,
+            flagged_claims=flagged,
+            downgraded=True,
+            grounding_checked=True,
+            notes=(notes + grounding_notes) or ["report unsupported"],
         )
         return report, result
 
@@ -95,5 +188,10 @@ def verify(report: InvestigationReport, store: EvidenceStore) -> tuple[Investiga
         }
     )
     return report, VerificationResult(
-        ok=not downgraded, dropped_claims=dropped, downgraded=downgraded, notes=notes
+        ok=not downgraded,
+        dropped_claims=dropped,
+        flagged_claims=flagged,
+        downgraded=downgraded,
+        grounding_checked=True,
+        notes=notes + grounding_notes,
     )
