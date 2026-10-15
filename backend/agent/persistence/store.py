@@ -25,6 +25,7 @@ import structlog
 
 from backend.agent.evidence import Evidence
 from backend.agent.models import (
+    ApprovalRecord,
     Claim,
     Confidence,
     InvestigationReport,
@@ -55,6 +56,54 @@ def _dt(value: datetime | None) -> datetime | None:
 
 def _json(value: Any) -> str:
     return json.dumps(value, default=str)
+
+
+_APPROVAL_COLUMNS = """approval_id, investigation_id, tool, arguments, status, proposal,
+    args_hash, proposal_version, expires_at, created_at, decided_by, decision_comment,
+    decided_at, executed_by, dispatched_at, executed_at, execution_result, verification"""
+
+
+def _approval_from_row(row) -> ApprovalRecord:
+    return ApprovalRecord(
+        approval_id=row["approval_id"],
+        investigation_id=row["investigation_id"],
+        tool=row["tool"],
+        arguments=json.loads(row["arguments"]),
+        status=row["status"],
+        proposal=json.loads(row["proposal"]),
+        args_hash=row["args_hash"],
+        proposal_version=row["proposal_version"] or 1,
+        expires_at=row["expires_at"],
+        created_at=row["created_at"],
+        decided_by=row["decided_by"],
+        decision_comment=row["decision_comment"],
+        decided_at=row["decided_at"],
+        executed_by=row["executed_by"],
+        dispatched_at=row["dispatched_at"],
+        executed_at=row["executed_at"],
+        execution_result=json.loads(row["execution_result"]),
+        verification=json.loads(row["verification"]) if row["verification"] is not None else None,
+    )
+
+
+async def _record_event(conn, investigation_id: str, event: str, payload: dict) -> None:
+    """Insert an audit event inside the caller's transaction."""
+    await conn.execute(
+        f"INSERT INTO {SCHEMA_NAME}.investigation_events "
+        "(investigation_id, event, payload) VALUES ($1,$2,$3)",
+        investigation_id,
+        event,
+        _json(payload or {}),
+    )
+
+
+
+
+class ApprovalTransitionError(Exception):
+    """An approval transition was requested from a state that forbids it.
+
+    Kept for API-layer mapping in later gates; the store itself signals lost
+    races by returning None."""
 
 
 class InvestigationStore:
@@ -226,6 +275,28 @@ class InvestigationStore:
                         f"SELECT investigation_id FROM {SCHEMA_NAME}.investigations WHERE status = 'running'"
                     )
                 ]
+                # orphaned in-flight approvals -> uncertain: transactional
+                # events + update, idempotent, never touches terminal states
+                await conn.execute(
+                    f"""
+                    INSERT INTO {SCHEMA_NAME}.investigation_events
+                        (investigation_id, event, payload)
+                    SELECT a.investigation_id, 'approval_interrupted',
+                           jsonb_build_object('approval_id', a.approval_id,
+                                              'reason', 'backend restart')
+                    FROM {SCHEMA_NAME}.approvals a
+                    WHERE a.status = 'executing'
+                    """,
+                )
+                await conn.execute(
+                    f"""
+                    UPDATE {SCHEMA_NAME}.approvals
+                    SET status = 'uncertain',
+                        execution_result = COALESCE(execution_result, '{{}}'::jsonb)
+                            || '{{"uncertain_reason": "backend restart"}}'::jsonb
+                    WHERE status = 'executing'
+                    """,
+                )
                 if not affected:
                     return []
                 await conn.execute(
@@ -362,3 +433,346 @@ class InvestigationStore:
             except asyncio.TimeoutError:
                 await self._pool.terminate()
             self._pool = None
+
+    # -- approvals (Phase 7, Gate 1) ------------------------------------------
+    #
+    # Every state transition is a single conditional UPDATE executed in the
+    # same transaction as its audit event: either both commit or neither does.
+    # Lost races (another decision/execution won) return None — callers map
+    # that to a typed conflict. Cancellation/uncertain paths never mark
+    # success: `mark_uncertain` and `revert_to_approved` are the only exits
+    # from `executing` besides a terminal result.
+
+    async def save_proposal(self, approval: ApprovalRecord) -> None:
+        if not self._ready:
+            await self.ensure_schema()
+        conn = await self._conn()
+        try:
+            async with conn.transaction():
+                await conn.execute(
+                    f"""
+                    INSERT INTO {SCHEMA_NAME}.approvals
+                        (approval_id, investigation_id, tool, arguments, status, proposal,
+                         args_hash, proposal_version, expires_at, created_at)
+                    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+                    ON CONFLICT (approval_id) DO UPDATE SET
+                        tool=EXCLUDED.tool, arguments=EXCLUDED.arguments, status=EXCLUDED.status,
+                        proposal=EXCLUDED.proposal, args_hash=EXCLUDED.args_hash,
+                        proposal_version=EXCLUDED.proposal_version, expires_at=EXCLUDED.expires_at
+                    """,
+                    approval.approval_id, approval.investigation_id, approval.tool,
+                    _json(approval.arguments), approval.status, _json(approval.proposal),
+                    approval.args_hash, approval.proposal_version, _dt(approval.expires_at),
+                    _dt(approval.created_at),
+                )
+                await _record_event(
+                    conn, approval.investigation_id, "proposal_created",
+                    {
+                        "approval_id": approval.approval_id,
+                        "tool": approval.tool,
+                        "arguments": approval.arguments,
+                        "args_hash": approval.args_hash,
+                        "expires_at": approval.expires_at.isoformat() if approval.expires_at else None,
+                        "proposal_version": approval.proposal_version,
+                    },
+                )
+        finally:
+            await self._release(self._pool, conn)
+
+    async def get_approval(self, approval_id: str) -> ApprovalRecord | None:
+        if not self._ready:
+            await self.ensure_schema()
+        conn = await self._conn()
+        try:
+            row = await conn.fetchrow(
+                f"SELECT {_APPROVAL_COLUMNS} FROM {SCHEMA_NAME}.approvals WHERE approval_id = $1",
+                approval_id,
+            )
+            return _approval_from_row(row) if row is not None else None
+        finally:
+            await self._release(self._pool, conn)
+
+    async def decide_approval(
+        self,
+        approval_id: str,
+        decision: str,
+        decided_by: str,
+        comment: str | None = None,
+        at: datetime | None = None,
+    ) -> ApprovalRecord | None:
+        """proposed -> approved | rejected. Returns None when the approval is
+        not in `proposed` (lost race, already decided, or unknown id)."""
+        if decision not in ("approved", "rejected"):
+            raise ValueError(f"invalid decision {decision!r}; expected 'approved' or 'rejected'")
+        if not decided_by or not decided_by.strip():
+            raise ValueError("decided_by must be a non-blank operator label")
+        if not self._ready:
+            await self.ensure_schema()
+        conn = await self._conn()
+        try:
+            async with conn.transaction():
+                row = await conn.fetchrow(
+                    f"""
+                    UPDATE {SCHEMA_NAME}.approvals
+                    SET status=$1, decided_by=$2, decision_comment=$3, decided_at=$4
+                    WHERE approval_id=$5 AND status='proposed'
+                    RETURNING {_APPROVAL_COLUMNS}
+                    """,
+                    decision, decided_by.strip(), comment,
+                    _dt(at or datetime.now(timezone.utc)), approval_id,
+                )
+                if row is None:
+                    return None
+                await _record_event(
+                    conn, row["investigation_id"], "proposal_decided",
+                    {
+                        "approval_id": approval_id, "decision": decision,
+                        "decided_by": decided_by.strip(), "comment": comment,
+                    },
+                )
+                return _approval_from_row(row)
+        finally:
+            await self._release(self._pool, conn)
+
+    async def begin_execution(
+        self, approval_id: str, executed_by: str, at: datetime | None = None
+    ) -> ApprovalRecord | None:
+        """approved -> executing. Returns None on a lost race (another executor
+        already holds the transition) or when the approval is not approved."""
+        if not executed_by or not executed_by.strip():
+            raise ValueError("executed_by must be a non-blank operator label")
+        if not self._ready:
+            await self.ensure_schema()
+        conn = await self._conn()
+        try:
+            async with conn.transaction():
+                row = await conn.fetchrow(
+                    f"""
+                    UPDATE {SCHEMA_NAME}.approvals
+                    SET status='executing', executed_by=$2, executed_at=$3
+                    WHERE approval_id=$1 AND status='approved'
+                    RETURNING {_APPROVAL_COLUMNS}
+                    """,
+                    approval_id, executed_by.strip(),
+                    _dt(at or datetime.now(timezone.utc)),
+                )
+                if row is None:
+                    return None
+                await _record_event(
+                    conn, row["investigation_id"], "execution_started",
+                    {"approval_id": approval_id, "executed_by": executed_by.strip()},
+                )
+                return _approval_from_row(row)
+        finally:
+            await self._release(self._pool, conn)
+
+    async def mark_dispatched(self, approval_id: str, at: datetime | None = None) -> None:
+        """Record that the write request has been dispatched (this timestamp is
+        what distinguishes pre-dispatch from post-dispatch cancellation)."""
+        if not self._ready:
+            await self.ensure_schema()
+        conn = await self._conn()
+        try:
+            await conn.execute(
+                f"UPDATE {SCHEMA_NAME}.approvals SET dispatched_at=$2 "
+                "WHERE approval_id=$1 AND status='executing'",
+                approval_id, _dt(at or datetime.now(timezone.utc)),
+            )
+        finally:
+            await self._release(self._pool, conn)
+
+    async def mark_uncertain(
+        self, approval_id: str, reason: str, at: datetime | None = None
+    ) -> ApprovalRecord | None:
+        """executing -> uncertain: the write outcome could not be established.
+        Never counted as success or availability failure; resolvable only by
+        read-back recovery."""
+        if not self._ready:
+            await self.ensure_schema()
+        conn = await self._conn()
+        try:
+            async with conn.transaction():
+                row = await conn.fetchrow(
+                    f"""
+                    UPDATE {SCHEMA_NAME}.approvals
+                    SET status='uncertain',
+                        execution_result = COALESCE(execution_result, '{{}}'::jsonb) || $2::jsonb
+                    WHERE approval_id=$1 AND status='executing'
+                    RETURNING {_APPROVAL_COLUMNS}
+                    """,
+                    approval_id,
+                    _json({"uncertain_reason": reason[:300],
+                           "at": (at or datetime.now(timezone.utc)).isoformat()}),
+                )
+                if row is None:
+                    return None
+                await _record_event(
+                    conn, row["investigation_id"], "execution_uncertain",
+                    {"approval_id": approval_id, "reason": reason[:300]},
+                )
+                return _approval_from_row(row)
+        finally:
+            await self._release(self._pool, conn)
+
+    async def revert_to_approved(
+        self, approval_id: str, at: datetime | None = None
+    ) -> ApprovalRecord | None:
+        """executing -> approved: pre-dispatch cancellation; provably no write
+        was sent (dispatched_at IS NULL guards the transition)."""
+        if not self._ready:
+            await self.ensure_schema()
+        conn = await self._conn()
+        try:
+            async with conn.transaction():
+                row = await conn.fetchrow(
+                    f"""
+                    UPDATE {SCHEMA_NAME}.approvals
+                    SET status='approved', executed_by=NULL, executed_at=NULL, dispatched_at=NULL
+                    WHERE approval_id=$1 AND status='executing' AND dispatched_at IS NULL
+                    RETURNING {_APPROVAL_COLUMNS}
+                    """,
+                    approval_id,
+                )
+                if row is None:
+                    return None
+                await _record_event(
+                    conn, row["investigation_id"], "execution_reverted",
+                    {"approval_id": approval_id, "reason": "cancelled before dispatch"},
+                )
+                return _approval_from_row(row)
+        finally:
+            await self._release(self._pool, conn)
+
+    async def finish_execution(
+        self,
+        approval_id: str,
+        terminal_status: str,
+        execution_result: dict,
+        verification: dict | None = None,
+        at: datetime | None = None,
+    ) -> ApprovalRecord | None:
+        """executing -> executed | failed (the write outcome was established)."""
+        if terminal_status not in ("executed", "failed"):
+            raise ValueError(f"invalid terminal status {terminal_status!r}")
+        if not self._ready:
+            await self.ensure_schema()
+        conn = await self._conn()
+        try:
+            async with conn.transaction():
+                row = await conn.fetchrow(
+                    f"""
+                    UPDATE {SCHEMA_NAME}.approvals
+                    SET status=$2, executed_at=$3, execution_result=$4, verification=$5
+                    WHERE approval_id=$1 AND status='executing'
+                    RETURNING {_APPROVAL_COLUMNS}
+                    """,
+                    approval_id, terminal_status, _dt(at or datetime.now(timezone.utc)),
+                    _json(execution_result),
+                    _json(verification) if verification is not None else None,
+                )
+                if row is None:
+                    return None
+                await _record_event(
+                    conn, row["investigation_id"], "execution_finished",
+                    {"approval_id": approval_id, "status": terminal_status},
+                )
+                return _approval_from_row(row)
+        finally:
+            await self._release(self._pool, conn)
+
+    async def resolve_uncertain(
+        self,
+        approval_id: str,
+        terminal_status: str,
+        recovery_executed_by: str,
+        execution_result: dict,
+        verification: dict | None = None,
+        at: datetime | None = None,
+    ) -> ApprovalRecord | None:
+        """uncertain -> executed | failed via read-back recovery. The recovery
+        operator is recorded separately inside execution_result.recovery; the
+        original operator is preserved."""
+        if terminal_status not in ("executed", "failed"):
+            raise ValueError(f"invalid terminal status {terminal_status!r}")
+        if not recovery_executed_by or not recovery_executed_by.strip():
+            raise ValueError("recovery executed_by must be a non-blank operator label")
+        if not self._ready:
+            await self.ensure_schema()
+        conn = await self._conn()
+        try:
+            async with conn.transaction():
+                row = await conn.fetchrow(
+                    f"""
+                    UPDATE {SCHEMA_NAME}.approvals
+                    SET status=$2,
+                        executed_by=$3,
+                        executed_at=$4,
+                        execution_result = COALESCE(execution_result, '{{}}'::jsonb) || $5::jsonb,
+                        verification=$6
+                    WHERE approval_id=$1 AND status='uncertain'
+                    RETURNING {_APPROVAL_COLUMNS}
+                    """,
+                    approval_id, terminal_status, recovery_executed_by.strip(),
+                    _dt(at or datetime.now(timezone.utc)),
+                    _json({"recovery": {"executed_by": recovery_executed_by.strip(),
+                                        "resolved_from": "uncertain"}}),
+                    _json(verification) if verification is not None else None,
+                )
+                if row is None:
+                    return None
+                await _record_event(
+                    conn, row["investigation_id"], "uncertainty_resolved",
+                    {"approval_id": approval_id, "status": terminal_status,
+                     "recovery_executed_by": recovery_executed_by.strip()},
+                )
+                return _approval_from_row(row)
+        finally:
+            await self._release(self._pool, conn)
+
+    async def list_approvals(self, status: str | None = None) -> list[ApprovalRecord]:
+        if not self._ready:
+            await self.ensure_schema()
+        conn = await self._conn()
+        try:
+            if status is None:
+                rows = await conn.fetch(
+                    f"SELECT {_APPROVAL_COLUMNS} FROM {SCHEMA_NAME}.approvals ORDER BY created_at"
+                )
+            else:
+                rows = await conn.fetch(
+                    f"SELECT {_APPROVAL_COLUMNS} FROM {SCHEMA_NAME}.approvals "
+                    "WHERE status = $1 ORDER BY created_at",
+                    status,
+                )
+            return [_approval_from_row(row) for row in rows]
+        finally:
+            await self._release(self._pool, conn)
+
+    async def mark_executing_approvals_uncertain(self) -> int:
+        """Startup-sweep helper: executing -> uncertain (idempotent, terminal-
+        safe) with transactional events. Returns the number of rows resolved."""
+        if not self._ready:
+            await self.ensure_schema()
+        conn = await self._conn()
+        try:
+            async with conn.transaction():
+                events = await conn.fetch(
+                    f"""
+                    INSERT INTO {SCHEMA_NAME}.investigation_events
+                        (investigation_id, event, payload)
+                    SELECT a.investigation_id, 'approval_interrupted',
+                           jsonb_build_object('approval_id', a.approval_id,
+                                              'reason', 'backend restart')
+                    FROM {SCHEMA_NAME}.approvals a
+                    WHERE a.status = 'executing'
+                    RETURNING investigation_id
+                    """,
+                )
+                status = await conn.execute(
+                    f"UPDATE {SCHEMA_NAME}.approvals SET status='uncertain' WHERE status='executing'"
+                )
+                count = int(status.split()[-1])
+                log.info("executing_approvals_marked_uncertain", count=count, events=len(events))
+                return count
+        finally:
+            await self._release(self._pool, conn)

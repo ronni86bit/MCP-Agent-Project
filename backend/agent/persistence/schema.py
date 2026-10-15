@@ -12,7 +12,7 @@ from __future__ import annotations
 import asyncpg
 
 SCHEMA_NAME = "agent_state"
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 _MIGRATION_V1 = [
     f"""
@@ -126,6 +126,25 @@ _MIGRATION_V1 = [
 ]
 
 MIGRATIONS: dict[int, list[str]] = {1: _MIGRATION_V1}
+
+# v2: approval lifecycle columns (Phase 7, `acknowledge_alert`). Additive only —
+# existing v1 rows keep their values and gain NULL/defaulted new columns.
+_MIGRATION_V2 = [
+    f"ALTER TABLE {SCHEMA_NAME}.approvals ADD COLUMN IF NOT EXISTS proposal JSONB NOT NULL DEFAULT '{{}}'::jsonb",
+    f"ALTER TABLE {SCHEMA_NAME}.approvals ADD COLUMN IF NOT EXISTS args_hash TEXT",
+    f"ALTER TABLE {SCHEMA_NAME}.approvals ADD COLUMN IF NOT EXISTS proposal_version INTEGER",
+    f"ALTER TABLE {SCHEMA_NAME}.approvals ADD COLUMN IF NOT EXISTS expires_at TIMESTAMPTZ",
+    f"ALTER TABLE {SCHEMA_NAME}.approvals ADD COLUMN IF NOT EXISTS decided_by TEXT",
+    f"ALTER TABLE {SCHEMA_NAME}.approvals ADD COLUMN IF NOT EXISTS decision_comment TEXT",
+    f"ALTER TABLE {SCHEMA_NAME}.approvals ADD COLUMN IF NOT EXISTS executed_by TEXT",
+    f"ALTER TABLE {SCHEMA_NAME}.approvals ADD COLUMN IF NOT EXISTS dispatched_at TIMESTAMPTZ",
+    f"ALTER TABLE {SCHEMA_NAME}.approvals ADD COLUMN IF NOT EXISTS executed_at TIMESTAMPTZ",
+    f"ALTER TABLE {SCHEMA_NAME}.approvals ADD COLUMN IF NOT EXISTS execution_result JSONB NOT NULL DEFAULT '{{}}'::jsonb",
+    f"ALTER TABLE {SCHEMA_NAME}.approvals ADD COLUMN IF NOT EXISTS verification JSONB",
+    f"CREATE INDEX IF NOT EXISTS idx_approvals_status ON {SCHEMA_NAME}.approvals (status)",
+]
+
+MIGRATIONS: dict[int, list[str]] = {1: _MIGRATION_V1, 2: _MIGRATION_V2}
 
 
 async def ensure_schema(conn: asyncpg.Connection) -> int:

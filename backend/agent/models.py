@@ -130,3 +130,43 @@ class PlanVersionInfo(BaseModel):
     plan: Plan
     revision_reason: str = ""
     superseded: bool = False
+
+
+class ApprovalRecord(BaseModel):
+    """One human-gated write action (Phase 7: `acknowledge_alert` only).
+
+    Status lifecycle:
+    proposed -> approved -> executing -> executed -> (verification recorded)
+                                           -> failed
+                                           -> uncertain -> (recovery) executed/failed
+    proposed -> rejected | expired | superseded
+    """
+
+    approval_id: str
+    investigation_id: str
+    tool: str
+    arguments: dict[str, Any] = Field(default_factory=dict)
+    status: Literal[
+        "proposed",
+        "approved",
+        "rejected",
+        "expired",
+        "superseded",
+        "executing",
+        "executed",
+        "failed",
+        "uncertain",
+    ] = "proposed"
+    proposal: dict[str, Any] = Field(default_factory=dict)  # full ActionProposal payload (rationale, evidence_ids)
+    args_hash: str | None = None
+    proposal_version: int = 1
+    expires_at: datetime | None = None
+    created_at: datetime = Field(default_factory=_utcnow)
+    decided_by: str | None = None
+    decision_comment: str | None = None
+    decided_at: datetime | None = None
+    executed_by: str | None = None
+    dispatched_at: datetime | None = None
+    executed_at: datetime | None = None
+    execution_result: dict[str, Any] = Field(default_factory=dict)
+    verification: dict[str, Any] | None = None
