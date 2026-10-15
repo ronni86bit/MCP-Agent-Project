@@ -7,6 +7,7 @@ Handlers validate inputs (models.py), read the deterministic fixture store
 from __future__ import annotations
 
 import time
+from datetime import datetime, timezone
 from typing import Any
 
 import structlog
@@ -16,6 +17,7 @@ from mcp.server.mcpserver.exceptions import ToolError
 
 from backend.mcp.servers.monitoring_mcp import store as store_module
 from backend.mcp.servers.monitoring_mcp.models import (
+    AcknowledgeAlertInputs,
     AlertsInputs,
     CompareMetricsInputs,
     ErrorRateInputs,
@@ -45,6 +47,12 @@ def _inputs(model: type, **kwargs: Any) -> Any:
             f"{'.'.join(str(part) for part in err['loc'])}: {err['msg']}" for err in exc.errors()
         )
         raise ToolError(f"invalid arguments: {reasons}") from None
+
+
+def _require_alert(alert_id: str) -> None:
+    if not _store.get_alert(alert_id):
+        raise ToolError(f"unknown alert {alert_id!r}; alerts are referenced by id as returned "
+                        f"by get_recent_alerts")
 
 
 def _require_service(service: str) -> None:
@@ -252,3 +260,48 @@ async def compare_metric_windows(
         "delta_pct": round(delta / a["avg"] * 100, 2) if a["avg"] else None,
     }
     return _finish("compare_metric_windows", started, payload)
+
+
+@mcp.tool()
+async def acknowledge_alert(
+    alert_id: str,
+    acknowledged_by: str,
+    note: str | None = None,
+) -> dict[str, Any]:
+    """Acknowledges an alert: records who acknowledged it and when. WRITE TOOL.
+
+    This is the only write operation in the demo stack. It is NOT part of the
+    read-only investigation toolset: the investigation agent must never call it
+    directly — it is invoked by the human-approval service after explicit
+    approval. Rejects unknown alerts and already-acknowledged alerts.
+
+    Args:
+        alert_id: identifier of the alert to acknowledge (e.g. "ALT-2071")
+        acknowledged_by: non-blank operator label recorded as the acknowledger
+        note: optional acknowledgement note (max 200 characters)
+    """
+    inp: AcknowledgeAlertInputs = _inputs(
+        AcknowledgeAlertInputs,
+        alert_id=alert_id, acknowledged_by=acknowledged_by, note=note,
+    )
+    _require_alert(inp.alert_id)
+    started = time.perf_counter()
+    at = datetime.now(timezone.utc)
+    try:
+        record = _store.acknowledge_alert(
+            inp.alert_id, inp.acknowledged_by, inp.note, at
+        )
+    except ValueError as exc:
+        raise ToolError(str(exc)) from None
+    return _finish(
+        "acknowledge_alert", started,
+        {
+            "acknowledged": True,
+            "alert_id": record["id"],
+            "service": record["service"],
+            "acknowledged_at": record["acknowledged_at"],
+            "acknowledged_by": record["acknowledged_by"],
+            "acknowledgement_note": record.get("acknowledgement_note"),
+            "count": 1,
+        },
+    )

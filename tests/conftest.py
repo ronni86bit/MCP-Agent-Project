@@ -59,3 +59,34 @@ def pg_manager(ro_dsn: str):
         )
 
     return _make
+
+
+# -- approval lifecycle fixtures (Phase 7, Gate 2) -----------------------------
+
+APPROVALS_TEST_DB = "ops_agent_approvals_g2_test"
+
+
+@pytest.fixture(scope="module")
+def approvals_state_dsn(admin_dsn: str) -> str:
+    """Dedicated, freshly recreated state database for approval-lifecycle tests."""
+    async def recreate() -> str:
+        admin = await asyncpg.connect(admin_dsn)
+        try:
+            await admin.execute(f"DROP DATABASE IF EXISTS {APPROVALS_TEST_DB} WITH (FORCE)")
+            await admin.execute(f"CREATE DATABASE {APPROVALS_TEST_DB}")
+        finally:
+            await admin.close()
+        return admin_dsn.rsplit("/", 1)[0] + f"/{APPROVALS_TEST_DB}"
+
+    return asyncio.run(recreate())
+
+
+@pytest.fixture
+def state_test_store(approvals_state_dsn: str):
+    from backend.agent.persistence.store import InvestigationStore
+
+    """Fresh InvestigationStore per test on the recreated approvals test DB."""
+    def _factory() -> InvestigationStore:
+        return InvestigationStore(dsn=approvals_state_dsn)
+
+    return _factory

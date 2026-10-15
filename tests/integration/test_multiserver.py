@@ -40,7 +40,9 @@ async def test_all_three_servers_discover_exactly_fourteen_tools(github_mock):
     async with MultiMCPManager(_server_factories(github_mock)) as managers:
         catalog = ToolCatalog.from_managers(managers.managers, SERVER_ALLOWLISTS)
     assert len(catalog.allowlisted_entries()) == 14
-    assert catalog.unexpected() == []
+    # the write tool appears in raw discovery but is excluded (and logged)
+    assert catalog.unexpected() == ["monitoring-mcp.acknowledge_alert"]
+    assert not catalog.is_executable("monitoring-mcp__acknowledge_alert")
 
     per_server = {server: 0 for server in SERVER_ALLOWLISTS}
     for entry in catalog.allowlisted_entries():

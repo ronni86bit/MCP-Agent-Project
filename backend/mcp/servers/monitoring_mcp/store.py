@@ -94,6 +94,33 @@ class MonitoringStore:
             and self._overlaps_window(record["started_at"], record["resolved_at"], start, end)
         ]
 
+    def get_alert(self, alert_id: str) -> dict | None:
+        return next((r for r in self._alert_records if r["id"] == alert_id), None)
+
+    def acknowledge_alert(
+        self, alert_id: str, acknowledged_by: str, note: str | None, at: datetime
+    ) -> dict:
+        """Mutate the in-memory alert record: the only write path in this
+        server. Raises ValueError for unknown or already-acknowledged alerts;
+        the caller (server.py) maps that onto a typed tool error."""
+        record = self.get_alert(alert_id)
+        if record is None:
+            raise ValueError(f"unknown alert {alert_id!r}; valid alerts: " + self._alert_ids())
+        if record["acknowledged"]:
+            raise ValueError(
+                f"alert {alert_id!r} is already acknowledged "
+                f"(by {record['acknowledged_by']!r} at {record['acknowledged_at']})"
+            )
+        record["acknowledged"] = True
+        record["acknowledged_at"] = at.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+        record["acknowledged_by"] = acknowledged_by
+        if note:
+            record["acknowledgement_note"] = note[:200]
+        return dict(record)
+
+    def _alert_ids(self) -> str:
+        return ", ".join(sorted(r["id"] for r in self._alert_records))
+
     def alerts(self, start: date, end: date, service: str | None, severity: str | None) -> list[dict]:
         window_start, _ = _day_bounds(start)
         _, window_end = _day_bounds(end)

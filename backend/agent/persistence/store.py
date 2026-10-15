@@ -663,7 +663,7 @@ class InvestigationStore:
                     f"""
                     UPDATE {SCHEMA_NAME}.approvals
                     SET status=$2, executed_at=$3, execution_result=$4, verification=$5
-                    WHERE approval_id=$1 AND status='executing'
+                    WHERE approval_id=$1 AND status IN ('executing', 'uncertain')
                     RETURNING {_APPROVAL_COLUMNS}
                     """,
                     approval_id, terminal_status, _dt(at or datetime.now(timezone.utc)),
@@ -724,6 +724,96 @@ class InvestigationStore:
                     conn, row["investigation_id"], "uncertainty_resolved",
                     {"approval_id": approval_id, "status": terminal_status,
                      "recovery_executed_by": recovery_executed_by.strip()},
+                )
+                return _approval_from_row(row)
+        finally:
+            await self._release(self._pool, conn)
+
+    async def fail_approval(
+        self, approval_id: str, reason: str, at: datetime | None = None
+    ) -> ApprovalRecord | None:
+        """approved -> failed (refused before dispatch: tampered/expired/stale)
+        or executing -> failed (server-side execution error)."""
+        if not self._ready:
+            await self.ensure_schema()
+        conn = await self._conn()
+        try:
+            async with conn.transaction():
+                row = await conn.fetchrow(
+                    f"""
+                    UPDATE {SCHEMA_NAME}.approvals
+                    SET status='failed',
+                        execution_result = COALESCE(execution_result, '{{}}'::jsonb) || $2::jsonb,
+                        executed_at=COALESCE(executed_at, $3)
+                    WHERE approval_id=$1 AND status IN ('approved', 'executing')
+                    RETURNING {_APPROVAL_COLUMNS}
+                    """,
+                    approval_id,
+                    _json({"refusal_reason": reason[:300]}),
+                    _dt(at or datetime.now(timezone.utc)),
+                )
+                if row is None:
+                    return None
+                await _record_event(
+                    conn, row["investigation_id"], "execution_refused",
+                    {"approval_id": approval_id, "reason": reason[:300]},
+                )
+                return _approval_from_row(row)
+        finally:
+            await self._release(self._pool, conn)
+
+    async def mark_expired(self, approval_id: str, at: datetime | None = None) -> ApprovalRecord | None:
+        """proposed | approved -> expired (terminal)."""
+        if not self._ready:
+            await self.ensure_schema()
+        conn = await self._conn()
+        try:
+            async with conn.transaction():
+                row = await conn.fetchrow(
+                    f"""
+                    UPDATE {SCHEMA_NAME}.approvals
+                    SET status='expired', decided_at=COALESCE(decided_at, $2)
+                    WHERE approval_id=$1 AND status IN ('proposed', 'approved')
+                    RETURNING {_APPROVAL_COLUMNS}
+                    """,
+                    approval_id, _dt(at or datetime.now(timezone.utc)),
+                )
+                if row is None:
+                    return None
+                await _record_event(
+                    conn, row["investigation_id"], "approval_expired",
+                    {"approval_id": approval_id},
+                )
+                return _approval_from_row(row)
+        finally:
+            await self._release(self._pool, conn)
+
+    async def mark_superseded(
+        self, approval_id: str, reason: str = "target already acknowledged", at: datetime | None = None
+    ) -> ApprovalRecord | None:
+        """executing -> superseded: the pre-dispatch read-back showed the write
+        is no longer needed (no write sent)."""
+        if not self._ready:
+            await self.ensure_schema()
+        conn = await self._conn()
+        try:
+            async with conn.transaction():
+                row = await conn.fetchrow(
+                    f"""
+                    UPDATE {SCHEMA_NAME}.approvals
+                    SET status='superseded',
+                        execution_result = COALESCE(execution_result, '{{}}'::jsonb) || $2::jsonb
+                    WHERE approval_id=$1 AND status='executing'
+                    RETURNING {_APPROVAL_COLUMNS}
+                    """,
+                    approval_id,
+                    _json({"superseded_reason": reason[:300]}),
+                )
+                if row is None:
+                    return None
+                await _record_event(
+                    conn, row["investigation_id"], "approval_superseded",
+                    {"approval_id": approval_id, "reason": reason[:300]},
                 )
                 return _approval_from_row(row)
         finally:

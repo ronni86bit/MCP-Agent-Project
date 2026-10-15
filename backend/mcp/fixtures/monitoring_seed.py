@@ -90,23 +90,26 @@ def build_monitoring_fixtures(spec: ScenarioSpec) -> MonitoringFixtures:
 
     alert = spec.monitoring.alert
     incident = spec.monitoring.incident
+    def _alert(record_id, service, metric, severity, fired_at, message):
+        # canonical fixtures always start unacknowledged; acknowledgement is a
+        # runtime write against the in-memory store and never mutates these files
+        return {
+            "id": record_id,
+            "service": service,
+            "metric": metric,
+            "severity": severity,
+            "fired_at": fired_at,
+            "message": message,
+            "acknowledged": False,
+            "acknowledged_at": None,
+            "acknowledged_by": None,
+        }
+
     alerts = [
-        {
-            "id": "ALT-1044",
-            "service": "catalog",
-            "metric": "latency_p95_ms",
-            "severity": "warning",
-            "fired_at": "2026-09-15T09:12:00Z",
-            "message": "catalog latency_p95_ms above 150ms for 20m",
-        },
-        {
-            "id": alert.id,
-            "service": alert.service,
-            "metric": alert.metric,
-            "severity": alert.severity,
-            "fired_at": alert.fired_at_utc.isoformat().replace("+00:00", "Z"),
-            "message": alert.message,
-        },
+        _alert("ALT-1044", "catalog", "latency_p95_ms", "warning",
+               "2026-09-15T09:12:00Z", "catalog latency_p95_ms above 150ms for 20m"),
+        _alert(alert.id, alert.service, alert.metric, alert.severity,
+               alert.fired_at_utc.isoformat().replace("+00:00", "Z"), alert.message),
     ]
     incidents = [
         {

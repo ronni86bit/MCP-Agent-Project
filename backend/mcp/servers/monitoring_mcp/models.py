@@ -67,6 +67,21 @@ class AlertsInputs(_Window):
     limit: int = Field(default=50, ge=1, le=100)
 
 
+class AcknowledgeAlertInputs(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    alert_id: str = Field(min_length=1, max_length=40)
+    acknowledged_by: str = Field(min_length=1, max_length=80)
+    note: str | None = Field(default=None, max_length=200)
+
+    @model_validator(mode="after")
+    def _strip_identity(self) -> "AcknowledgeAlertInputs":
+        if not self.acknowledged_by.strip():
+            raise ValueError("acknowledged_by must be a non-blank operator label")
+        self.acknowledged_by = self.acknowledged_by.strip()
+        return self
+
+
 class CompareMetricsInputs(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -145,6 +160,9 @@ class AlertRecord(BaseModel):
     severity: str
     fired_at: str
     message: str
+    acknowledged: bool = False
+    acknowledged_at: str | None = None
+    acknowledged_by: str | None = None
 
 
 class WindowStat(BaseModel):

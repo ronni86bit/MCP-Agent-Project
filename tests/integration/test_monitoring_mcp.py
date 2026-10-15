@@ -36,9 +36,17 @@ def mcp_data(result) -> dict:
     return json.loads("".join(getattr(b, "text", "") for b in result.content))
 
 
-async def test_discovery_offers_exactly_the_five_approved_tools(monitoring_manager):
+async def test_discovery_offers_five_readonly_tools_plus_excluded_write(monitoring_manager):
+    """Raw monitoring discovery lists the 5 approved read-only tools plus the
+    acknowledge_alert WRITE tool, which stays excluded from the LLM catalog
+    (SERVER_ALLOWLISTS) and from the agent executor's policy gate."""
+    from backend.agent.catalog import SERVER_ALLOWLISTS
+
     async with monitoring_manager as mcp:
-        assert {tool.name for tool in mcp.tools()} == {t.split("__")[1] for t in EXPECTED_TOOLS}
+        names = {tool.name for tool in mcp.tools()}
+    readonly = SERVER_ALLOWLISTS["monitoring-mcp"]
+    assert names == readonly | {"acknowledge_alert"}
+    assert "acknowledge_alert" not in readonly
 
 
 async def test_get_service_metrics_returns_hourly_series(monitoring_manager):
