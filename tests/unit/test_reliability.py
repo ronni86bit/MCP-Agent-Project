@@ -186,3 +186,38 @@ def test_circuit_breaker_success_resets_failure_count():
     breaker.before_call()
     breaker.record_failure()
     assert breaker.state == CircuitState.closed  # 2 consecutive failures < 3
+
+
+def test_cancelled_half_open_probe_releases_reservation():
+    """Audit fix: a cancelled probe releases its reservation without recording
+    an outcome; the breaker stays half_open and a fresh probe may be acquired."""
+    from backend.reliability import CircuitState
+    breaker = CircuitBreaker("audit", failure_threshold=1, cooldown_seconds=1)
+    breaker.state = CircuitState.half_open        # a probe is in flight
+    breaker._probe_in_flight = True
+    breaker.release_probe()                       # "cancellation"
+    assert breaker.state == CircuitState.half_open
+    assert breaker._probe_in_flight is False
+    assert breaker.before_call() == CircuitState.half_open  # fresh probe acquired
+
+
+def test_cancelled_probe_is_neither_success_nor_availability_failure():
+    breaker = CircuitBreaker("audit2", failure_threshold=3, cooldown_seconds=1)
+    breaker.failures = 1
+    breaker.state = CircuitState.half_open
+    breaker._probe_in_flight = True
+    breaker.release_probe()
+    assert breaker.failures == 1, "cancelled probe must not count as failure"
+    assert breaker.state == CircuitState.half_open, "and must not close the breaker"
+
+
+def test_probe_release_keeps_exclusivity_until_released():
+    breaker = CircuitBreaker("audit3", failure_threshold=3, cooldown_seconds=1)
+    breaker.state = CircuitState.half_open
+    breaker._probe_in_flight = True
+    import pytest as _pytest
+    from backend.reliability import CircuitOpenError
+    with _pytest.raises(CircuitOpenError):
+        breaker.before_call()
+    breaker.release_probe()
+    assert breaker.before_call() == CircuitState.half_open

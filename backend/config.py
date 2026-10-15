@@ -25,6 +25,7 @@ class Settings(BaseSettings):
     circuit_failure_threshold: int = 3   # consecutive availability failures -> open
     circuit_cooldown_seconds: float = 60.0
     rate_limit_per_server_per_minute: int = 240
+    state_store_init_timeout_seconds: float = 30.0
 
     # Investigation loop bounds — the loop is never unbounded.
     max_investigation_steps: int = 8

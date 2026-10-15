@@ -11,6 +11,7 @@ import enum
 import random
 import time
 from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable
 from typing import Any, TypeVar
 
 import structlog
@@ -120,6 +121,8 @@ class CircuitBreaker:
     ):
         if failure_threshold < 1:
             raise ValueError("failure_threshold must be >= 1")
+        if cooldown_seconds < 0:
+            raise ValueError("cooldown_seconds must be >= 0")
         self.name = name
         self.failure_threshold = failure_threshold
         self.cooldown_seconds = cooldown_seconds
@@ -171,3 +174,35 @@ class CircuitBreaker:
                 previous=previous.value,
             )
         return self.state
+
+    def release_probe(self) -> CircuitState:
+        """Release a half-open probe reservation WITHOUT recording an outcome.
+
+        For cancelled/uncertain probes: the breaker stays half_open, the failure
+        count is untouched, and a subsequent call may acquire a fresh probe.
+        No-op unless a half-open probe reservation is actually held.
+        """
+        if self.state == CircuitState.half_open:
+            self._probe_in_flight = False
+        return self.state
+
+
+def validate_reliability_settings(settings: Any) -> None:
+    """Fail fast (at application startup) on invalid reliability configuration.
+
+    Mirrors the runtime validations inside the primitives so bad env values
+    surface once, clearly, instead of failing the first investigation.
+    """
+    errors: list[str] = []
+    if settings.llm_retry_attempts < 0:
+        errors.append("LLM_RETRY_ATTEMPTS must be >= 0")
+    if settings.llm_retry_backoff_seconds < 0:
+        errors.append("LLM_RETRY_BACKOFF_SECONDS must be >= 0")
+    if settings.circuit_failure_threshold < 1:
+        errors.append("CIRCUIT_FAILURE_THRESHOLD must be >= 1")
+    if settings.circuit_cooldown_seconds < 0:
+        errors.append("CIRCUIT_COOLDOWN_SECONDS must be >= 0")
+    if settings.rate_limit_per_server_per_minute < 1:
+        errors.append("RATE_LIMIT_PER_SERVER_PER_MINUTE must be >= 1")
+    if errors:
+        raise ValueError("invalid reliability configuration: " + "; ".join(errors))

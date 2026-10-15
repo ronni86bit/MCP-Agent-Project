@@ -31,6 +31,7 @@ from backend.mcp.errors import (
     ToolTimeoutError,
     TransportError,
 )
+from backend.reliability import CircuitBreaker, CircuitState, TokenBucket
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -161,6 +162,11 @@ class MCPClientManager:
                 log.info("mcp_session_started", server=self.name, tools=sorted(self._tools),
                          attempt=attempt)
                 return
+            except asyncio.CancelledError:
+                # deadline/shutdown cancellation is never retried and never
+                # converted: clean up and propagate as-is
+                await stack.aclose()
+                raise
             except BaseException as exc:
                 await stack.aclose()
                 last_error = exc
@@ -292,8 +298,6 @@ class MultiMCPManager:
         circuit_failure_threshold: int = 3,
         circuit_cooldown_seconds: float = 60.0,
     ):
-        from backend.reliability import CircuitBreaker, TokenBucket
-
         self.factories = factories
         self.managers: dict[str, MCPClientManager] = {}
         self._stack: AsyncExitStack | None = None
@@ -342,23 +346,32 @@ class MultiMCPManager:
         manager = self.manager(server)
         breaker = self.breakers.get(server)
         bucket = self.buckets.get(server)
-        if breaker is not None:
-            breaker.before_call()  # CircuitOpenError when open
-        if bucket is not None:
-            waited = await bucket.acquire()
-            if waited > 0:
-                log.info("rate_limit_wait", server=server, waited_seconds=round(waited, 2))
+        probe_state = breaker.before_call() if breaker is not None else None
         try:
-            result = await manager.call_tool(name, arguments)
-        except (ToolTimeoutError, TransportError) as exc:
-            if breaker is not None:
-                breaker.record_failure()
-            raise
-        except MCPClientError:
-            # server responded (validation/execution error): it is alive
+            if bucket is not None:
+                waited = await bucket.acquire()
+                if waited > 0:
+                    log.info("rate_limit_wait", server=server, waited_seconds=round(waited, 2))
+            try:
+                result = await manager.call_tool(name, arguments)
+            except (ToolTimeoutError, TransportError) as exc:
+                if breaker is not None:
+                    breaker.record_failure()
+                raise
+            except MCPClientError:
+                # server responded (validation/execution error): it is alive
+                if breaker is not None:
+                    breaker.record_success()
+                raise
             if breaker is not None:
                 breaker.record_success()
+            return result
+        except BaseException:
+            # Cancellation (or any escape that skips outcome recording) during a
+            # half-open probe releases the reservation: the outcome is unknown,
+            # so it is neither a success nor an availability failure, and a
+            # later call may acquire a fresh probe. release_probe no-ops unless
+            # a half-open reservation is actually held.
+            if breaker is not None and probe_state == CircuitState.half_open:
+                breaker.release_probe()
             raise
-        if breaker is not None:
-            breaker.record_success()
-        return result

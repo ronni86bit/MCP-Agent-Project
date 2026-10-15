@@ -518,3 +518,28 @@ def test_allowlists_cover_exactly_fourteen_readonly_tools(tool, server):
     total = sum(len(tools) for tools in SERVER_ALLOWLISTS.values())
     assert total == 14
     assert SERVER_DOMAINS[server] in {"business", "operational", "engineering"}
+
+
+async def test_deadline_expiring_during_startup_reports_wall_clock():
+    """Audit fix regression: cancellation during MCP startup (deadline hit while
+    sessions are still initializing) must surface as the wall-clock failure,
+    not as an MCP transport failure."""
+    class SlowStartMulti:
+        breakers: dict = {}
+        managers: dict = {}
+
+        async def __aenter__(self):
+            await asyncio.sleep(5)  # startup "hangs" past the deadline
+            return self
+
+        async def __aexit__(self, *exc_info):
+            return False
+
+    record = await _run(
+        _scripted([_daily_call()]),
+        lambda: SlowStartMulti(),
+        _settings(max_investigation_seconds=0.3),
+    )
+    assert record.status == "failed"
+    assert "wall-clock" in record.failure_reason
+    assert "mcp failure" not in record.failure_reason

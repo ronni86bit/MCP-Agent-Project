@@ -15,6 +15,7 @@ from collections.abc import Callable
 import structlog
 
 from backend.agent.catalog import SERVER_ALLOWLISTS
+from backend.reliability import validate_reliability_settings
 from backend.agent.llm.adapter import LLMClient, LLMError, OpenAICompatLLM
 from backend.agent.loop import InvestigationLoop
 from backend.agent.persistence.store import InvestigationStore
@@ -65,6 +66,7 @@ class AgentService:
             retry_attempts=settings.llm_retry_attempts,
             retry_backoff_seconds=settings.llm_retry_backoff_seconds,
         )
+        validate_reliability_settings(settings)
         self.allowlist = allowlist
         self._custom_factory = manager_factory
         self._server_factories = server_factories or default_server_factories(settings)
@@ -90,8 +92,9 @@ class AgentService:
         if self.store is None:
             return
         try:
-            version = await self.store.ensure_schema()
-            interrupted = await self.store.mark_interrupted()
+            async with asyncio.timeout(self.settings.state_store_init_timeout_seconds):
+                version = await self.store.ensure_schema()
+                interrupted = await self.store.mark_interrupted()
             log.info("state_store_ready", schema_version=version, interrupted=interrupted)
         except Exception as exc:
             log.warning("state_store_unavailable", error=str(exc)[:200])
