@@ -22,6 +22,7 @@ from backend.agent.persistence.store import InvestigationStore
 from backend.agent.state import InvestigationRecord, InvestigationRegistry
 from backend.config import Settings
 from backend.mcp.client_manager import MCPClientManager, MultiMCPManager
+from backend.security.approval_service import ApprovalService
 
 log = structlog.get_logger(__name__)
 
@@ -83,6 +84,13 @@ class AgentService:
         self.store: InvestigationStore | None = (
             store if store is not None else InvestigationStore()
         )
+        self.approvals: ApprovalService | None = ApprovalService(
+            store=self.store,
+            monitoring_session_factory=lambda: MultiMCPManager(
+                {"monitoring-mcp": self._server_factories["monitoring-mcp"]}
+            ),
+            execution_timeout_seconds=settings.approval_execution_timeout_seconds,
+        )
         self._tasks: set[asyncio.Task] = set()
 
     async def startup(self) -> None:
@@ -99,6 +107,8 @@ class AgentService:
         except Exception as exc:
             log.warning("state_store_unavailable", error=str(exc)[:200])
             self.store = None  # degrade to in-memory operation
+            if self.approvals is not None:
+                self.approvals.store = None  # proposals need persistence
 
     async def get_investigation(self, investigation_id: str) -> InvestigationRecord | None:
         """Live record first, persisted record second (survives restarts)."""
@@ -132,6 +142,7 @@ class AgentService:
             settings=self.settings,
             allowlist=self.allowlist,
             state_store=self.store,
+            approval_service=self.approvals,
         )
         result = await loop.run()
         if result.status == "running":  # loop.run() always finalizes; belt for regressions
@@ -174,3 +185,5 @@ class AgentService:
                 await self.store.close()
             except Exception as exc:
                 log.warning("state_store_close_failed", error=str(exc)[:200])
+        if self.approvals is not None:
+            await self.approvals.shutdown()

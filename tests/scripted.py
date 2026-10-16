@@ -11,6 +11,7 @@ from pydantic import BaseModel
 
 from backend.agent.llm.adapter import LLMClient, LLMMessage, LLMResponse
 from backend.agent.models import (
+    ActionProposal,
     InvestigationReport,
     Plan,
     PlanReviewDecision,
@@ -29,12 +30,17 @@ class ScriptedLLM(LLMClient):
         selections: list,
         report: InvestigationReport,
         reviews: list[PlanReviewDecision] | None = None,
+        proposal: ActionProposal | None = None,
+        fail_proposal: bool = False,
     ):
         self.understanding = understanding
         self.plan = plan
         self.selections = list(selections)
         self.report = report
         self.reviews = list(reviews or [])
+        self.proposal = proposal
+        self.fail_proposal = fail_proposal
+        self.proposal_calls = 0
         self.select_calls = 0
         self.review_calls = 0
         self.last_messages: list[LLMMessage] | None = None
@@ -56,6 +62,14 @@ class ScriptedLLM(LLMClient):
             return decision, LLMResponse(model=self.model_name)
         if schema_model is InvestigationReport:
             return self.report, LLMResponse(model=self.model_name)
+        if schema_model is ActionProposal:
+            self.proposal_calls += 1
+            if self.fail_proposal:
+                from backend.agent.llm.adapter import MalformedOutputError
+
+                raise MalformedOutputError("scripted malformed proposal")
+            assert self.proposal is not None, "no scripted proposal configured"
+            return self.proposal, LLMResponse(model=self.model_name)
         raise AssertionError(f"unexpected schema model {schema_model.__name__}")
 
     async def chat_with_tools(

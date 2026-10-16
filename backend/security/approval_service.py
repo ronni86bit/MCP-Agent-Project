@@ -120,64 +120,51 @@ class ApprovalService:
     def eligible_alert_ids(self, evidence_records: list[Any]) -> list[str]:
         return eligible_alert_ids(evidence_records)
 
-    async def create_proposal(
+    async def persist_proposal(
         self,
         record: Any,
         evidence_records: list[Any],
-        propose_llm_call: Callable[[], Awaitable[dict]],
+        proposal: Any,
     ) -> ApprovalRecord:
-        """Validate eligibility deterministically, then ask the model to draft
-        the proposal; the result is validated again before persistence.
+        """Validate a model-drafted ActionProposal against the registry and the
+        deterministic evidence eligibility set, then persist it as `proposed`.
 
-        `propose_llm_call` returns a dict: {tool, arguments{alert_id, note},
-        rationale, evidence_ids}. Raises ApprovalUnsupportedError /
-        ApprovalPrecheckFailedError on invalid proposals (nothing persisted).
-        """
+        Raises ApprovalUnsupportedError / ApprovalPrecheckFailedError on
+        invalid proposals (nothing is persisted)."""
         if record.plan is None:
             raise ApprovalUnsupportedError("investigation has no plan; refusing to propose")
-        eligible = self.eligible_alert_ids(evidence_records)
-        if not eligible:
-            raise ApprovalPrecheckFailedError(
-                "no eligible unacknowledged alert found in collected evidence"
-            )
-
-        raw = await propose_llm_call()
-        tool = str(raw.get("tool", ""))
-        if tool not in WRITABLE_ACTIONS:
+        if proposal.tool not in WRITABLE_ACTIONS:
             raise ApprovalUnsupportedError(
-                f"proposed action {tool!r} is not a registered write action"
+                f"proposed action {proposal.tool!r} is not a registered write action"
             )
-        arguments = dict(raw.get("arguments") or {})
-        alert_id = str(arguments.get("alert_id", ""))
+        eligible = self.eligible_alert_ids(evidence_records)
+        alert_id = proposal.arguments.alert_id
         if alert_id not in eligible:
             raise ApprovalPrecheckFailedError(
                 f"proposed alert {alert_id!r} is not an eligible unacknowledged alert "
                 f"from the collected evidence; eligible: {eligible}"
             )
-        note = arguments.get("note")
-        if note is not None and len(str(note)) > _MAX_NOTE:
-            raise ApprovalPrecheckFailedError(f"note exceeds {_MAX_NOTE} characters")
 
         now = self._clock()
         expires_at = now + timedelta(seconds=self.settings.approval_ttl_seconds)
         version = max((p.proposal_version for p in record.proposals), default=0) + 1
-        args = {"alert_id": alert_id, "note": str(note) if note is not None else None}
+        args = {"alert_id": alert_id, "note": proposal.arguments.note}
         approval = ApprovalRecord(
             approval_id=f"apr-{uuid.uuid4().hex[:12]}",
             investigation_id=record.investigation_id,
-            tool=tool,
+            tool=proposal.tool,
             arguments=args,
             status="proposed",
             proposal={
-                "tool": tool,
+                "tool": proposal.tool,
                 "arguments": args,
-                "rationale": str(raw.get("rationale", ""))[:400],
-                "evidence_ids": list(raw.get("evidence_ids", [])),
+                "rationale": proposal.rationale,
+                "evidence_ids": list(proposal.evidence_ids),
                 "proposal_version": version,
             },
             args_hash=args_hash(
-                action=tool,
-                target_server=WRITABLE_ACTIONS[tool],
+                action=proposal.tool,
+                target_server=WRITABLE_ACTIONS[proposal.tool],
                 arguments=args,
                 proposal_version=version,
                 expires_at=expires_at,
@@ -191,7 +178,7 @@ class ApprovalService:
             "approval_proposed",
             approval_id=approval.approval_id,
             investigation_id=record.investigation_id,
-            tool=tool,
+            tool=proposal.tool,
             alert_id=alert_id,
             expires_at=expires_at.isoformat(),
         )

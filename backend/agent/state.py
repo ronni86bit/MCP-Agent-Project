@@ -15,6 +15,7 @@ from pydantic import BaseModel, Field
 
 from backend.agent.evidence import Evidence
 from backend.agent.models import (
+    ApprovalRecord,
     InvestigationReport,
     Plan,
     PlanVersionInfo,
@@ -44,6 +45,7 @@ class InvestigationRecord(BaseModel):
     tool_calls: list[ToolCallObservation] = Field(default_factory=list)
     evidence: list[Evidence] = Field(default_factory=list)
     evidence_ids: list[str] = Field(default_factory=list)
+    proposals: list[ApprovalRecord] = Field(default_factory=list)
     report: InvestigationReport | None = None
     verification: VerificationResult | None = None
     failure_reason: str | None = None

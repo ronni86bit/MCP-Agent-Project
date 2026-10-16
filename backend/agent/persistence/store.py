@@ -227,6 +227,8 @@ class InvestigationStore:
                         record.investigation_id, item.evidence_id, item.server, item.tool_name,
                         item.step, _json(item.arguments), _json(item.summary), _dt(item.at),
                     )
+                for approval in record.proposals:
+                    await self.save_proposal(approval)
                 if record.report is not None and record.verification is not None:
                     await conn.execute(
                         f"""
@@ -416,6 +418,12 @@ class InvestigationStore:
                     )
                 )
                 record.evidence_ids.append(erow["evidence_id"])
+            for prow in await conn.fetch(
+                f"SELECT {_APPROVAL_COLUMNS} FROM {SCHEMA_NAME}.approvals "
+                "WHERE investigation_id = $1 ORDER BY created_at",
+                investigation_id,
+            ):
+                record.proposals.append(_approval_from_row(prow))
             rrow = await conn.fetchrow(
                 f"SELECT * FROM {SCHEMA_NAME}.reports WHERE investigation_id = $1", investigation_id
             )
@@ -431,7 +439,7 @@ class InvestigationStore:
             try:
                 await asyncio.wait_for(self._pool.close(), timeout=10)
             except asyncio.TimeoutError:
-                await self._pool.terminate()
+                self._pool.terminate()  # sync in asyncpg
             self._pool = None
 
     # -- approvals (Phase 7, Gate 1) ------------------------------------------

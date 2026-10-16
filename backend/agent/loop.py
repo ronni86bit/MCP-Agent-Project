@@ -19,6 +19,7 @@ from backend.agent.evidence import EvidenceStore
 from backend.agent.executor import Executor
 from backend.agent.llm.adapter import LLMClient, LLMError
 from backend.agent.models import (
+    ActionProposal,
     PlanVersionInfo,
     StepRecord,
     ToolCallObservation,
@@ -31,6 +32,9 @@ from backend.config import Settings
 from backend.mcp.client_manager import MultiMCPManager
 from backend.mcp.errors import MCPClientError
 from backend.reliability import CircuitState
+from pydantic import ValidationError
+from backend.security.approval_actions import WRITABLE_ACTIONS, eligible_alert_ids
+from backend.security.approval_service import ApprovalService
 
 log = structlog.get_logger(__name__)
 
@@ -45,6 +49,7 @@ class InvestigationLoop:
         settings: Settings,
         allowlist: dict[str, frozenset[str]] = SERVER_ALLOWLISTS,
         state_store: InvestigationStore | None = None,
+        approval_service: ApprovalService | None = None,
     ):
         self.llm = llm
         self._manager_factory = manager_factory
@@ -57,6 +62,7 @@ class InvestigationLoop:
         self._context = planner.dataset_context()
         self._finished_early = False
         self._revisions_used = 0
+        self.approvals = approval_service
 
     # -- public --------------------------------------------------------------
 
@@ -207,6 +213,90 @@ class InvestigationLoop:
             confidence=verified.confidence.value,
             verifier_ok=result.ok,
             flagged=len(result.flagged_claims),
+        )
+
+        # optional action-mode phase: runs AFTER the investigation is complete;
+        # failures are advisory and never change the completion semantics
+        await self._maybe_propose_action()
+
+    async def _maybe_propose_action(self) -> None:
+        """Optional ACTION-MODE phase: propose at most ONE `acknowledge_alert`
+        acknowledgement from the collected evidence.
+
+        Deterministic eligibility gate runs BEFORE any model call: without an
+        eligible unacknowledged alert in the stored evidence, nothing is
+        proposed and the model is not invoked. Every failure is advisory — the
+        completed investigation and its report are never changed, and the
+        model can never approve or execute its own proposal."""
+        record = self.record
+        if not self.settings.action_mode_enabled:
+            return
+        if self.approvals is None or self.state_store is None:
+            record.warnings.append("action proposal skipped: approval service unavailable")
+            return
+        if self._llm_calls_left() <= 0:
+            record.warnings.append("action proposal skipped: LLM call budget exhausted")
+            return
+
+        eligible = eligible_alert_ids(self.evidence.all())
+        if not eligible:
+            log.info("action_proposal_skipped", investigation_id=record.investigation_id,
+                     reason="no eligible unacknowledged alert in evidence")
+            return
+
+        record.states_visited.append("propose_action")
+        try:
+            proposal, _ = await self._llm_call(
+                "propose_action",
+                self.llm.complete_structured(
+                    _proposal_messages(
+                        question=record.question,
+                        digest=self.evidence.digest(max_chars=900),
+                        eligible=eligible,
+                        dataset_context=self._context,
+                    ),
+                    ActionProposal,
+                    max_tokens=400,
+                ),
+            )
+        except (LLMError, ValidationError) as exc:
+            record.warnings.append(
+                f"action proposal skipped: model produced no valid proposal ({str(exc)[:160]})"
+            )
+            log.warning("action_proposal_failed", investigation_id=record.investigation_id,
+                        error=str(exc)[:200])
+            return
+
+        # semantic validation: registry + eligibility + evidence references
+        errors: list[str] = []
+        if proposal.tool not in WRITABLE_ACTIONS:
+            errors.append(f"unsupported action {proposal.tool!r}")
+        if proposal.arguments.alert_id not in eligible:
+            errors.append(
+                f"alert {proposal.arguments.alert_id!r} is not an eligible "
+                f"unacknowledged alert from the evidence (eligible: {eligible})"
+            )
+        missing = [ref for ref in proposal.evidence_ids if self.evidence.get(ref) is None]
+        if missing:
+            errors.append(f"evidence references not found: {missing}")
+        if errors:
+            record.warnings.append(
+                "action proposal rejected: " + "; ".join(errors)
+            )
+            log.warning("action_proposal_rejected", investigation_id=record.investigation_id,
+                        errors=errors)
+            return
+
+        approval = await self.approvals.persist_proposal(
+            record, self.evidence.all(), proposal
+        )
+        record.proposals.append(approval)
+        await self._checkpoint("action_proposed")
+        log.info(
+            "action_proposal_persisted",
+            investigation_id=record.investigation_id,
+            approval_id=approval.approval_id,
+            alert_id=approval.arguments.get("alert_id"),
         )
 
     async def _run_step(self, plan_step, executor: Executor, step_record: StepRecord,
@@ -480,3 +570,34 @@ def _now():
     from datetime import datetime, timezone
 
     return datetime.now(timezone.utc)
+
+
+def _proposal_messages(*, question: str, digest: str, eligible: list[str],
+                       dataset_context: str) -> list:
+    from backend.agent.llm.adapter import LLMMessage
+
+    return [
+        LLMMessage(
+            role="system",
+            content=(
+                "You propose ONE acknowledgement action for an operations "
+                "investigation, for a human to approve or reject. You can only "
+                "PROPOSE: you can never approve or execute anything. Choose the "
+                "alert to acknowledge ONLY from the eligible ids given. Cite the "
+                "evidence record ids that justify the proposal. Be brief. "
+                "Respond with a single JSON object and nothing else."
+            ),
+        ),
+        LLMMessage(
+            role="user",
+            content=(
+                f"Question: {question}\n\n"
+                f"Dataset context: {dataset_context}\n\n"
+                f"Evidence records:\n{digest or '(none)'}\n\n"
+                f"Eligible unacknowledged alert ids: {eligible}\n\n"
+                'Return JSON: {"tool": "acknowledge_alert", '
+                '"arguments": {"alert_id", "note"}, rationale, '
+                "evidence_ids}."
+            ),
+        ),
+    ]

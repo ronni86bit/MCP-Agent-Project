@@ -11,6 +11,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Literal
+from pydantic import ConfigDict
 
 from pydantic import BaseModel, Field
 
@@ -170,3 +171,26 @@ class ApprovalRecord(BaseModel):
     executed_at: datetime | None = None
     execution_result: dict[str, Any] = Field(default_factory=dict)
     verification: dict[str, Any] | None = None
+
+
+class ActionProposalArguments(BaseModel):
+    """Exact write arguments for the registered action (Phase 7:
+    `acknowledge_alert`). Strict: no extra fields, bounded lengths."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    alert_id: str = Field(min_length=1, max_length=40)
+    note: str | None = Field(default=None, max_length=200)
+
+
+class ActionProposal(BaseModel):
+    """The model's PROPOSAL of a human-approval action. A proposal is never an
+    approval and never executes anything; `tool` is locked to the registry via
+    Literal so unsupported actions cannot even be constructed."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    tool: Literal["acknowledge_alert"]
+    arguments: ActionProposalArguments
+    rationale: str = Field(min_length=3, max_length=400)
+    evidence_ids: list[str] = Field(min_length=1, max_length=10)
