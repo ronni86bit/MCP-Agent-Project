@@ -202,6 +202,11 @@ class InvestigationLoop:
         record.verification = result
         if result.dropped_claims or result.downgraded:
             record.warnings.append("report adjusted by verifier: " + "; ".join(result.notes))
+        # optional action-mode phase: runs BEFORE the status transitions to
+        # complete, so polling clients see proposals when they see `complete`.
+        # Failures are advisory and never change the completion semantics.
+        await self._maybe_propose_action()
+
         record.status = "complete"
         record.stage = "complete"
         record.finished_at = _now()
@@ -214,10 +219,6 @@ class InvestigationLoop:
             verifier_ok=result.ok,
             flagged=len(result.flagged_claims),
         )
-
-        # optional action-mode phase: runs AFTER the investigation is complete;
-        # failures are advisory and never change the completion semantics
-        await self._maybe_propose_action()
 
     async def _maybe_propose_action(self) -> None:
         """Optional ACTION-MODE phase: propose at most ONE `acknowledge_alert`

@@ -22,7 +22,15 @@ from backend.agent.persistence.store import InvestigationStore
 from backend.agent.state import InvestigationRecord, InvestigationRegistry
 from backend.config import Settings
 from backend.mcp.client_manager import MCPClientManager, MultiMCPManager
-from backend.security.approval_service import ApprovalService
+from backend.mcp.errors import MCPClientError
+from backend.reliability import CircuitOpenError
+from backend.security.approval_actions import WRITABLE_ACTIONS
+from backend.security.approval_service import ApprovalError, ApprovalService, ApprovalUncertainError
+from backend.security.approval_service import (
+    ApprovalError,
+    ApprovalService,
+    ApprovalUncertainError,
+)
 
 log = structlog.get_logger(__name__)
 
@@ -109,6 +117,45 @@ class AgentService:
             self.store = None  # degrade to in-memory operation
             if self.approvals is not None:
                 self.approvals.store = None  # proposals need persistence
+
+    async def list_approvals(self, status: str | None = None) -> list[ApprovalRecord]:
+        if self.store is None:
+            return []
+        try:
+            return await self.store.list_approvals(status)
+        except Exception as exc:
+            log.warning("state_store_list_approvals_failed", error=str(exc)[:200])
+            return []
+
+    async def get_approval(self, approval_id: str) -> ApprovalRecord | None:
+        if self.store is None:
+            return None
+        try:
+            return await self.store.get_approval(approval_id)
+        except Exception as exc:
+            log.warning("state_store_get_approval_failed", error=str(exc)[:200])
+            return None
+
+    async def decide_approval(
+        self, approval_id: str, decision: str, decided_by: str, comment: str | None = None
+    ) -> ApprovalRecord:
+        if self.approvals is None:
+            raise ApprovalError("approval service unavailable")
+        return await self.approvals.decide(approval_id, decision, decided_by, comment)
+
+    async def execute_approval(self, approval_id: str, executed_by: str) -> ApprovalRecord:
+        if self.approvals is None:
+            raise ApprovalError("approval service unavailable")
+        try:
+            return await self.approvals.execute(approval_id, executed_by)
+        except ApprovalUncertainError:
+            # outcome unknown: the row is `uncertain`; expose it, never replay
+            record = await self.store.get_approval(approval_id) if self.store else None
+            if record is not None:
+                return record
+            raise
+        except CircuitOpenError as exc:
+            raise ApprovalError(f"monitoring source unavailable; write not attempted: {exc}") from exc
 
     async def get_investigation(self, investigation_id: str) -> InvestigationRecord | None:
         """Live record first, persisted record second (survives restarts)."""

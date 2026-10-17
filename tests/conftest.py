@@ -49,6 +49,19 @@ def ro_dsn(admin_dsn: str) -> str:
 
 
 @pytest.fixture
+def monitoring_manager(ro_dsn: str):
+    def _make(**kwargs) -> MCPClientManager:
+        return MCPClientManager(
+            "monitoring-mcp",
+            sys.executable,
+            ["-m", "backend.mcp.servers.monitoring_mcp"],
+            **kwargs,
+        )
+
+    return _make
+
+
+@pytest.fixture
 def pg_manager(ro_dsn: str):
     def _make(**kwargs) -> MCPClientManager:
         return MCPClientManager(

@@ -34,7 +34,7 @@ def summarize_result(payload: Any) -> dict[str, Any]:
     if not isinstance(payload, dict):
         return {"value": sanitize(payload)}
     summary = {k: sanitize(v) for k, v in payload.items() if k not in ("rows", "breakdown")}
-    for key in ("rows", "breakdown"):
+    for key in ("rows", "breakdown", "alerts", "incidents", "points", "daily"):
         if isinstance(payload.get(key), list):
             summary[key] = payload[key][:3]
             summary[f"{key}_total"] = len(payload[key])

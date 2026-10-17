@@ -464,9 +464,11 @@ class InvestigationStore:
                          args_hash, proposal_version, expires_at, created_at)
                     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
                     ON CONFLICT (approval_id) DO UPDATE SET
-                        tool=EXCLUDED.tool, arguments=EXCLUDED.arguments, status=EXCLUDED.status,
+                        tool=EXCLUDED.tool, arguments=EXCLUDED.arguments,
                         proposal=EXCLUDED.proposal, args_hash=EXCLUDED.args_hash,
                         proposal_version=EXCLUDED.proposal_version, expires_at=EXCLUDED.expires_at
+                    -- status is NOT updated on conflict: lifecycle transitions
+                    -- (decide/execute/finish) own the status column
                     """,
                     approval.approval_id, approval.investigation_id, approval.tool,
                     _json(approval.arguments), approval.status, _json(approval.proposal),

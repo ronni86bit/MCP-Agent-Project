@@ -8,7 +8,7 @@ evidence-grounded conclusions with human-approved actions.
 Canonical scenario: *"Why did today's sales drop?"* — answered by correlating sales data,
 a recent checkout deployment, rising checkout error rates, and the resulting alert/incident.
 
-**Status: Phase 6 — reliability (bounded retries, rate limits, circuit breakers, timeouts, partial-failure reporting).**
+**Status: Phase 7 — human-in-the-loop approvals (`acknowledge_alert` lifecycle: propose → decision → execute → verify).**
 (Phase 1: MCP fundamentals · Phase 2: postgres-mcp · Phase 3: agent runtime · Phase 4: multi-server correlation — complete.)
 
 - Engineering rules & architecture decisions: see [AGENTS.md](AGENTS.md).
@@ -95,6 +95,33 @@ The final `InvestigationReport` carries conclusion, claims, confidence, caveats,
 
 Key env knobs (see `.env.example`): `OLLAMA_HOST`, `OLLAMA_MODEL`, `MAX_INVESTIGATION_STEPS`,
 `MAX_LLM_CALLS`, `MAX_INVESTIGATION_SECONDS`, `LLM_TIMEOUT_SECONDS`.
+
+## Phase 7 — Human-in-the-loop approvals
+
+The monitoring-mcp `acknowledge_alert` write tool is the first gated action.
+The loop's optional `propose_action` phase (enabled by `ACTION_MODE_ENABLED=true`) drafts a
+proposal referencing an eligible unacknowledged alert from the collected evidence. The
+proposal is persisted with a canonical SHA-256 hash binding action + target + arguments +
+version + expiry. A human approves or rejects via the API (`decided_by` is a mandatory
+non-blank audit label). Only an `approved` proposal can execute — always with the stored
+arguments, never client-supplied. Execution runs pre-dispatch read-back (rejecting stale or
+already-acknowledged targets), then dispatches the write. Post-dispatch cancellation or
+transport failure marks the approval `uncertain`; read-back-based recovery with a fresh
+operator label resolves it without a blind replay. Verification read-back on the same session
+confirms the acknowledgement — `verification.ok=false` is persisted as a visible discrepancy,
+distinct from the execution status.
+
+API:
+- `GET /api/approvals?status=` — list, optionally filtered by status
+- `GET /api/approvals/{id}` — one approval (404 if unknown)
+- `POST /api/approvals/{id}/decision` — `{decision: "approved"|"rejected", decided_by, comment?}`
+- `POST /api/approvals/{id}/execute` — `{executed_by}` (no write arguments accepted)
+
+### Acknowledgement-state durability
+
+Acknowledgement state lives in the monitoring process's in-memory fixture store. It resets
+when the monitoring server restarts. The durable audit record lives in the `approvals` table
+in the state store.
 
 ### Architecture boundary (Phase 3)
 

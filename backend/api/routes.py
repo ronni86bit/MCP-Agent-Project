@@ -1,5 +1,7 @@
-"""Phase 3 endpoints: health + investigation create/get (poll for results;
-SSE streaming is a later-phase addition)."""
+"""Phase 3+ endpoints: health + investigations (poll for results) + Phase 7
+approval endpoints (proposal lifecycle; SSE streaming is a later-phase
+addition). All approval decisions and executions route through the
+ApprovalService — routes never touch approval persistence directly."""
 
 from __future__ import annotations
 
@@ -7,9 +9,42 @@ from fastapi import APIRouter, Depends, HTTPException
 
 from backend.agent.service import AgentService
 from backend.api.deps import get_service
-from backend.api.schemas import InvestigationCreated, InvestigationRequest
+from backend.api.schemas import (
+    ApprovalDecisionRequest,
+    ApprovalExecuteRequest,
+    InvestigationCreated,
+    InvestigationRequest,
+    approval_out,
+)
+from backend.reliability import CircuitOpenError
+from backend.security.approval_actions import WRITABLE_ACTIONS
+from backend.security.approval_service import (
+    ApprovalError,
+    ApprovalExpiredError,
+    ApprovalInvalidIdentityError,
+    ApprovalNotFoundError,
+    ApprovalPrecheckFailedError,
+    ApprovalTamperedError,
+    ApprovalUncertainError,
+)
 
 router = APIRouter(prefix="/api")
+
+_VALID_APPROVAL_STATUSES = (
+    "proposed", "approved", "rejected", "expired", "superseded",
+    "executing", "executed", "failed", "uncertain",
+)
+
+
+def _approval_http_error(exc: ApprovalError) -> HTTPException:
+    """Map typed approval failures onto HTTP statuses."""
+    if isinstance(exc, ApprovalNotFoundError):
+        return HTTPException(status_code=404, detail=str(exc))
+    if isinstance(exc, ApprovalInvalidIdentityError):
+        return HTTPException(status_code=422, detail=str(exc))
+    if isinstance(exc, (ApprovalExpiredError, ApprovalTamperedError, ApprovalPrecheckFailedError)):
+        return HTTPException(status_code=409, detail=str(exc))
+    return HTTPException(status_code=409, detail=str(exc))  # conflicts and unknown failures
 
 
 @router.get("/health")
@@ -35,3 +70,70 @@ async def get_investigation(
     if record is None:
         raise HTTPException(status_code=404, detail=f"unknown investigation {investigation_id!r}")
     return record.dict_for_api()
+
+
+@router.get("/approvals")
+async def list_approvals(
+    status: str | None = None, service: AgentService = Depends(get_service)
+) -> dict:
+    if status is not None and status not in _VALID_APPROVAL_STATUSES:
+        raise HTTPException(
+            status_code=422,
+            detail=f"invalid status {status!r}; valid: {', '.join(_VALID_APPROVAL_STATUSES)}",
+        )
+    approvals = await service.list_approvals(status)
+    return {"count": len(approvals), "approvals": [approval_out(a) for a in approvals]}
+
+
+@router.get("/approvals/{approval_id}")
+async def get_approval(
+    approval_id: str, service: AgentService = Depends(get_service)
+) -> dict:
+    record = await service.get_approval(approval_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail=f"unknown approval {approval_id!r}")
+    return approval_out(record)
+
+
+@router.post("/approvals/{approval_id}/decision")
+async def decide_approval(
+    approval_id: str,
+    body: ApprovalDecisionRequest,
+    service: AgentService = Depends(get_service),
+) -> dict:
+    try:
+        record = await service.decide_approval(
+            approval_id, body.decision, body.decided_by, body.comment
+        )
+    except ApprovalNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ApprovalInvalidIdentityError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except ApprovalExpiredError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ApprovalError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return approval_out(record)
+
+
+@router.post("/approvals/{approval_id}/execute")
+async def execute_approval(
+    approval_id: str,
+    body: ApprovalExecuteRequest,
+    service: AgentService = Depends(get_service),
+) -> dict:
+    try:
+        record = await service.execute_approval(approval_id, body.executed_by)
+    except ApprovalNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ApprovalInvalidIdentityError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except ApprovalExpiredError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ApprovalTamperedError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ApprovalPrecheckFailedError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except (ApprovalError, CircuitOpenError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return approval_out(record)
