@@ -171,6 +171,10 @@ class MCPClientManager:
                 await stack.aclose()
                 last_error = exc
                 if attempt == 1:
+                    log.warning("mcp_start_retry",
+                                server=self.name,
+                                attempt=attempt,
+                                error=str(exc)[:200])
                     await asyncio.sleep(0.75 + random.uniform(0, 0.5))
         raise TransportError(
             f"failed to start MCP server {self.name!r} after 2 attempts: {last_error}"

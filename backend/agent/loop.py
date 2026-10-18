@@ -68,9 +68,13 @@ class InvestigationLoop:
 
     async def run(self) -> InvestigationRecord:
         record = self.record
+        structlog.contextvars.bind_contextvars(
+            investigation_id=record.investigation_id,
+            request_id=record.request_id,
+        )
         try:
             async with asyncio.timeout(self.settings.max_investigation_seconds):
-                await self._checkpoint("created")
+                await self._checkpoint("created", {"question": record.question[:200]})
                 async with self._manager_factory() as managers:
                     await self._investigate(managers)
         except TimeoutError:
@@ -82,6 +86,8 @@ class InvestigationLoop:
         except Exception as exc:  # orchestrator boundary: typed wrap, never hang
             log.exception("investigation_unexpected_error", investigation_id=record.investigation_id)
             self._fail(f"unexpected {type(exc).__name__}: {exc}")
+        finally:
+            structlog.contextvars.unbind_contextvars("investigation_id", "request_id")
         await self._checkpoint("status_" + record.status)
         return record
 
@@ -91,7 +97,7 @@ class InvestigationLoop:
         record = self.record
         catalog = ToolCatalog.from_managers(managers.managers, self.allowlist)
         record.states_visited.append("discover")
-        await self._checkpoint("tools_discovered")
+        await self._checkpoint("tools_discovered", {"allowlisted": len(catalog.allowlisted_entries())})
         if not catalog.allowlisted_entries():
             raise MCPClientError(
                 "no allowlisted tools discovered on any configured server; "
@@ -112,7 +118,7 @@ class InvestigationLoop:
         record.understanding = await self._llm_call(
             "understand", planner.understand(self.llm, record.question, self._context)
         )
-        await self._checkpoint("understanding_saved")
+        await self._checkpoint("understanding_saved", {"goal": record.understanding.goal[:200]})
 
         record.states_visited.append("plan")
         plan = await self._llm_call(
@@ -155,7 +161,7 @@ class InvestigationLoop:
             )
             record.steps.append(step_record)
             plan_step.status = "running"
-            await self._checkpoint("step_started")
+            await self._checkpoint("step_started", {"step": step_record.index, "action": step_record.action[:120]})
             step_instruction = plan_step.action + (
                 f" [use tool: {plan_step.tool}]" if plan_step.tool else ""
             )
@@ -210,7 +216,7 @@ class InvestigationLoop:
         record.status = "complete"
         record.stage = "complete"
         record.finished_at = _now()
-        await self._checkpoint("report_saved")
+        await self._checkpoint("report_saved", {"confidence": verified.confidence.value, "evidence_count": len(self.evidence)})
         log.info(
             "investigation_complete",
             investigation_id=record.investigation_id,
@@ -292,7 +298,7 @@ class InvestigationLoop:
             record, self.evidence.all(), proposal
         )
         record.proposals.append(approval)
-        await self._checkpoint("action_proposed")
+        await self._checkpoint("action_proposed", {"approval_id": approval.approval_id, "alert_id": approval.arguments.get("alert_id")})
         log.info(
             "action_proposal_persisted",
             investigation_id=record.investigation_id,
@@ -310,7 +316,7 @@ class InvestigationLoop:
                 step_record.status = "skipped"
                 plan_step.status = "skipped"
                 self._finished_early = True
-                await self._checkpoint("step_skipped")
+                await self._checkpoint("step_skipped", {"step": step_record.index})
                 return
             response = await self._llm_call(
                 "select_tool",
@@ -336,7 +342,7 @@ class InvestigationLoop:
                 step_record.status = "skipped"
                 plan_step.status = "skipped"
                 self._finished_early = True
-                await self._checkpoint("step_skipped")
+                await self._checkpoint("step_skipped", {"step": step_record.index})
                 return
 
             validation = executor.validate(request)
@@ -352,7 +358,7 @@ class InvestigationLoop:
                         error=validation.error,
                     )
                 )
-                await self._checkpoint("discovery_refreshed")
+                await self._checkpoint("discovery_refreshed", {"tool": request.name})
                 log.warning(
                     "unknown_tool_discovery_refresh",
                     investigation_id=record.investigation_id,
@@ -374,7 +380,7 @@ class InvestigationLoop:
                         error=validation.error,
                     )
                 )
-                await self._checkpoint("tool_call_recorded")
+                await self._checkpoint("tool_call_recorded", {"tool": request.name, "status": "rejected"})
                 log.warning(
                     "tool_selection_rejected",
                     investigation_id=record.investigation_id,
@@ -393,10 +399,10 @@ class InvestigationLoop:
                         error=validation.error,
                     )
                 )
-                await self._checkpoint("tool_call_recorded")
+                await self._checkpoint("tool_call_recorded", {"tool": request.name, "status": "rejected"})
                 step_record.status = "failed"
                 plan_step.status = "failed"
-                await self._checkpoint("step_failed")
+                await self._checkpoint("step_failed", {"step": step_record.index, "status": step_record.status})
                 log.warning(
                     "tool_selection_failed_after_repair",
                     investigation_id=record.investigation_id,
@@ -426,7 +432,7 @@ class InvestigationLoop:
                 step_record.evidence_ids.append(outcome.evidence_id)
                 record.evidence_ids.append(outcome.evidence_id)
                 record.evidence.append(self.evidence.get(outcome.evidence_id))
-                await self._checkpoint("evidence_added")
+                await self._checkpoint("evidence_added", {"step": step_record.index, "evidence_id": outcome.evidence_id})
                 return
 
             # Tool failure: typed, recorded, never blindly retried — plan
@@ -434,7 +440,7 @@ class InvestigationLoop:
             step_record.status = "failed"
             plan_step.status = "failed"
             record.warnings.append(f"step {plan_step.id}: {request.name} failed ({outcome.error_class})")
-            await self._checkpoint("step_failed")
+            await self._checkpoint("step_failed", {"step": step_record.index, "status": step_record.status})
             return
 
     async def _maybe_revise(self, attempted_plan: object, attempted: set[tuple[int, int]]) -> None:
@@ -492,7 +498,7 @@ class InvestigationLoop:
             version=record.plan_version,
             steps=len(decision.plan.steps),
         )
-        await self._checkpoint("plan_revised")
+        await self._checkpoint("plan_revised", {"version": record.plan_version, "reason": decision.revision_reason[:200]})
 
     def _adopt_plan(self, plan: Plan, *, revision_reason: str) -> None:
         """Install a plan as the current version, preserving history."""

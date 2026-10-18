@@ -258,6 +258,11 @@ class OpenAICompatLLM(LLMClient):
                         ),
                     ),
                 ]
+        log.error(
+            "llm_malformed_output",
+            schema=schema_model.__name__,
+            last_error=last_error[:200],
+        )
         raise MalformedOutputError(
             f"model did not produce schema-valid JSON for {schema_model.__name__} after repair: {last_error}"
         )
@@ -302,12 +307,15 @@ class OpenAICompatLLM(LLMClient):
         try:
             return await self._client.chat.completions.create(**request)
         except APITimeoutError as exc:
+            log.warning("llm_provider_timeout", model=self.model_name, error=str(exc)[:200])
             raise ProviderTimeoutError(f"LLM call timed out: {exc}") from exc
         except APIConnectionError as exc:
+            log.warning("llm_provider_unavailable", model=self.model_name, error=str(exc)[:200])
             raise ProviderUnavailableError(
                 f"cannot reach LLM provider: {exc}. Is Ollama running at the configured host?"
             ) from exc
         except NotFoundError as exc:
+            log.warning("llm_model_not_available", model=self.model_name)
             raise ModelNotAvailableError(
                 f"model {self.model_name!r} not found on the provider: {exc}. "
                 f"Run: ollama pull {self.model_name}"
@@ -315,14 +323,18 @@ class OpenAICompatLLM(LLMClient):
         except BadRequestError as exc:
             message = str(exc)
             if json_mode and "response_format" in message:
-                # Provider without json_object support: retry without it.
+                log.info("llm_json_mode_fallback", model=self.model_name,
+                         reason=message[:200])
                 request.pop("response_format")
                 try:
                     return await self._client.chat.completions.create(**request)
                 except (APIConnectionError, APITimeoutError, NotFoundError, BadRequestError, APIStatusError) as retry_exc:
                     raise self._map_unexpected(retry_exc) from retry_exc
+            log.warning("llm_provider_rejected", model=self.model_name, error=message[:200])
             raise ProviderResponseError(f"provider rejected the request: {message}") from exc
         except APIStatusError as exc:
+            log.warning("llm_provider_status_error", model=self.model_name,
+                        status_code=exc.status_code)
             raise self._map_unexpected(exc) from exc
 
     @staticmethod

@@ -138,10 +138,14 @@ class CircuitBreaker:
             if self._clock() - (self.opened_at or 0.0) >= self.cooldown_seconds:
                 self.state = CircuitState.half_open
                 self._probe_in_flight = False
+                log.info("circuit_half_open", circuit=self.name)
             else:
+                remaining = self.cooldown_seconds - (self._clock() - (self.opened_at or 0.0))
+                log.debug("circuit_rejected",
+                          circuit=self.name, state="open",
+                          cooldown_remaining=round(remaining, 1))
                 raise CircuitOpenError(
-                    f"circuit {self.name!r} is open; cooldown "
-                    f"{self.cooldown_seconds - (self._clock() - (self.opened_at or 0.0)):.1f}s remaining"
+                    f"circuit {self.name!r} is open; cooldown {remaining:.1f}s remaining"
                 )
         if self.state == CircuitState.half_open:
             if self._probe_in_flight:

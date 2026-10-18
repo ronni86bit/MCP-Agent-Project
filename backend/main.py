@@ -12,18 +12,24 @@ from fastapi import FastAPI
 from backend.agent.service import AgentService
 from backend.api import routes
 from backend.config import get_settings
+from backend.observability.logging import configure_logging
+from backend.observability.middleware import CorrelationMiddleware
 
 
 def create_app(service: AgentService | None = None) -> FastAPI:
+    settings = get_settings()
+    configure_logging(settings.log_level)
+
     @asynccontextmanager
     async def lifespan(app: FastAPI):
-        svc = service or AgentService(get_settings())
+        svc = service or AgentService(settings)
         app.state.service = svc
         await svc.startup()
         yield
         await svc.shutdown()
 
     app = FastAPI(title="AI Operations Investigation Agent", version="0.3.0", lifespan=lifespan)
+    app.add_middleware(CorrelationMiddleware)
     app.include_router(routes.router)
     return app
 

@@ -14,6 +14,9 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import httpx
+import structlog
+
+_log = structlog.get_logger(__name__)
 
 
 class GitHubError(Exception):
@@ -74,6 +77,8 @@ class GitHubClient:
                 raise GitHubUpstreamError(f"GitHub is unreachable ({path}): {exc}") from exc
             if response.status_code == 429 and attempt == 1:
                 retry_after = min(float(response.headers.get("Retry-After", "2") or 2), 5.0)
+                _log.warning("github_rate_limited_retry",
+                             path=path, retry_after=retry_after)
                 await asyncio.sleep(retry_after)
                 continue
             break

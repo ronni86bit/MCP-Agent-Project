@@ -19,6 +19,7 @@ from backend.agent.evidence import EvidenceStore
 from backend.agent.models import ToolCallRequest
 from backend.mcp.client_manager import MultiMCPManager
 from backend.mcp.errors import MCPClientError
+from backend.reliability import CircuitOpenError
 
 log = structlog.get_logger(__name__)
 
@@ -93,6 +94,22 @@ class Executor:
         started = time.perf_counter()
         try:
             result = await self.managers.call_tool(entry.server, entry.name, request.arguments)
+        except CircuitOpenError as exc:
+            duration = (time.perf_counter() - started) * 1000
+            log.warning(
+                "agent_tool_unavailable",
+                server=entry.server,
+                tool=entry.name,
+                step=step,
+                error_class="CircuitOpenError",
+                duration_ms=round(duration, 1),
+            )
+            return ExecutionOutcome(
+                ok=False,
+                error_class="CircuitOpenError",
+                error=str(exc)[:500],
+                duration_ms=duration,
+            )
         except MCPClientError as exc:
             duration = (time.perf_counter() - started) * 1000
             log.warning(

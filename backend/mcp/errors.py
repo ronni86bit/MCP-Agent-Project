@@ -37,9 +37,6 @@ class TransportError(MCPClientError):
     """The MCP session/transport failed (server crashed, pipe closed, protocol error)."""
 
 
-class CircuitOpenError(MCPClientError):
-    """The dependency's circuit breaker is open; the call was not attempted.
-
-    Counts as 'source unavailable': distinct from tool failure and from
-    'no results found', and must be reported as an explicit evidence gap.
-    """
+# CircuitOpenError lives in backend/reliability.py (canonical definition).
+# It is NOT an MCPClientError subclass — open-circuit rejections are
+# availability failures, not tool failures. The executor catches both.

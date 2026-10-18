@@ -228,6 +228,8 @@ class ApprovalService:
 
         now = self._clock()
         if row.expires_at is not None and now > row.expires_at.replace(tzinfo=row.expires_at.tzinfo):
+            log.warning("approval_expired", approval_id=approval_id,
+                        expires_at=row.expires_at.isoformat())
             await self.store.mark_expired(approval_id)
             raise ApprovalExpiredError(f"approval {approval_id!r} expired; refusing to execute")
 
@@ -239,6 +241,7 @@ class ApprovalService:
             expires_at=row.expires_at.replace(tzinfo=row.expires_at.tzinfo) if row.expires_at else now,
         )
         if row.args_hash is None or row.args_hash != recomputed:
+            log.warning("approval_tampered", approval_id=approval_id)
             await self.store.fail_approval(approval_id, "parameter hash mismatch (tampered?)")
             raise ApprovalTamperedError(
                 f"approval {approval_id!r} failed its binding-hash check; refusing to execute"
@@ -271,6 +274,8 @@ class ApprovalService:
                 )
                 raise ApprovalPrecheckFailedError("proposed alert no longer exists")
             if target.get("acknowledged"):
+                log.info("approval_superseded", approval_id=approval_id,
+                         alert_id=row.arguments.get("alert_id"))
                 await self.store.mark_superseded(approval_id)
                 raise ApprovalPrecheckFailedError(
                     f"alert {row.arguments.get('alert_id')!r} is already acknowledged"
@@ -292,11 +297,15 @@ class ApprovalService:
             except asyncio.CancelledError:
                 # post-dispatch cancellation: outcome cannot be established;
                 # the shielded task keeps running and records its own outcome
+                log.warning("approval_uncertain", approval_id=approval_id,
+                            reason="cancelled after dispatch")
                 await self.store.mark_uncertain(
                     approval_id, "execution cancelled after dispatch", at=self._clock()
                 )
                 raise
             except (asyncio.TimeoutError, MCPClientError, CircuitOpenError) as exc:
+                log.warning("approval_uncertain", approval_id=approval_id,
+                            error=str(exc)[:200])
                 await self.store.mark_uncertain(
                     approval_id, f"write outcome unknown: {str(exc)[:200]}", at=self._clock()
                 )
