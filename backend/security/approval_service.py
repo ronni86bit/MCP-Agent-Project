@@ -32,6 +32,7 @@ from pydantic import ValidationError
 from backend.agent.models import ApprovalRecord
 from backend.config import get_settings
 from backend.mcp.errors import MCPClientError
+from backend.observability import metrics
 from backend.reliability import CircuitOpenError
 from backend.security.approval_actions import WRITABLE_ACTIONS, args_hash, eligible_alert_ids
 
@@ -174,6 +175,7 @@ class ApprovalService:
             created_at=now,
         )
         await self.store.save_proposal(approval)
+        metrics.observe_approval_transition(approval.tool, "proposed")
         log.info(
             "approval_proposed",
             approval_id=approval.approval_id,
@@ -203,6 +205,8 @@ class ApprovalService:
             raise ApprovalConflictError(f"approval {approval_id!r} is {row.status!r}, not 'proposed'")
         if row.expires_at is not None and self._clock() > row.expires_at.replace(tzinfo=row.expires_at.tzinfo):
             expired = await self.store.mark_expired(approval_id)
+            if expired is not None:
+                metrics.observe_approval_transition(row.tool, "expired")
             raise ApprovalExpiredError(
                 f"approval {approval_id!r} expired at {row.expires_at.isoformat()}"
                 + ("" if expired is None else "; row marked expired")
@@ -212,6 +216,7 @@ class ApprovalService:
         )
         if decided is None:
             raise ApprovalConflictError(f"approval {approval_id!r} was decided concurrently")
+        metrics.observe_approval_transition(decided.tool, decision)
         log.info(
             "approval_decided",
             approval_id=approval_id, decision=decision, decided_by=operator,
@@ -230,7 +235,9 @@ class ApprovalService:
         if row.expires_at is not None and now > row.expires_at.replace(tzinfo=row.expires_at.tzinfo):
             log.warning("approval_expired", approval_id=approval_id,
                         expires_at=row.expires_at.isoformat())
-            await self.store.mark_expired(approval_id)
+            expired = await self.store.mark_expired(approval_id)
+            if expired is not None:
+                metrics.observe_approval_transition(row.tool, "expired")
             raise ApprovalExpiredError(f"approval {approval_id!r} expired; refusing to execute")
 
         recomputed = args_hash(
@@ -243,6 +250,7 @@ class ApprovalService:
         if row.args_hash is None or row.args_hash != recomputed:
             log.warning("approval_tampered", approval_id=approval_id)
             await self.store.fail_approval(approval_id, "parameter hash mismatch (tampered?)")
+            metrics.observe_approval_transition(row.tool, "failed")
             raise ApprovalTamperedError(
                 f"approval {approval_id!r} failed its binding-hash check; refusing to execute"
             )
@@ -252,6 +260,7 @@ class ApprovalService:
             raise ApprovalConflictError(
                 f"approval {approval_id!r} is not in 'approved' state; refusing to execute"
             )
+        metrics.observe_approval_transition(row.tool, "executing")
 
         target_server = WRITABLE_ACTIONS[row.tool]
         session = await self._session_factory().__aenter__()
@@ -272,11 +281,13 @@ class ApprovalService:
                     approval_id, "failed",
                     {"reason": f"alert {row.arguments.get('alert_id')!r} not found at execution time"},
                 )
+                metrics.observe_approval_transition(row.tool, "failed")
                 raise ApprovalPrecheckFailedError("proposed alert no longer exists")
             if target.get("acknowledged"):
                 log.info("approval_superseded", approval_id=approval_id,
                          alert_id=row.arguments.get("alert_id"))
                 await self.store.mark_superseded(approval_id)
+                metrics.observe_approval_transition(row.tool, "superseded")
                 raise ApprovalPrecheckFailedError(
                     f"alert {row.arguments.get('alert_id')!r} is already acknowledged"
                 )
@@ -289,7 +300,7 @@ class ApprovalService:
                 "note": row.arguments.get("note"),
             }
             write_task = asyncio.create_task(
-                self._dispatch_write(approval_id, session, target_server, write_args)
+                self._dispatch_write(approval_id, session, target_server, write_args, row.tool)
             )
             self._track(write_task)
             try:
@@ -302,6 +313,7 @@ class ApprovalService:
                 await self.store.mark_uncertain(
                     approval_id, "execution cancelled after dispatch", at=self._clock()
                 )
+                metrics.observe_approval_transition(row.tool, "uncertain")
                 raise
             except (asyncio.TimeoutError, MCPClientError, CircuitOpenError) as exc:
                 log.warning("approval_uncertain", approval_id=approval_id,
@@ -309,6 +321,7 @@ class ApprovalService:
                 await self.store.mark_uncertain(
                     approval_id, f"write outcome unknown: {str(exc)[:200]}", at=self._clock()
                 )
+                metrics.observe_approval_transition(row.tool, "uncertain")
                 raise ApprovalUncertainError(
                     f"acknowledgement write outcome is unknown: {str(exc)[:160]}"
                 ) from exc
@@ -333,6 +346,9 @@ class ApprovalService:
                 await self.store.mark_uncertain(
                     approval_id, "execution cancelled after dispatch", at=self._clock()
                 )
+                metrics.observe_approval_transition(row.tool, "uncertain")
+            else:
+                metrics.observe_approval_transition(row.tool, "approved")
             raise
         except (MCPClientError, CircuitOpenError) as exc:
             await self.store.finish_execution(approval_id, "failed", {"reason": str(exc)[:300]})
@@ -341,7 +357,7 @@ class ApprovalService:
             await session.__aexit__(None, None, None)
 
     async def _dispatch_write(
-        self, approval_id: str, session: Any, target_server: str, write_args: dict
+        self, approval_id: str, session: Any, target_server: str, write_args: dict, tool: str,
     ) -> dict:
         """Tracked write-task body: performs the write and records the outcome
         (executed + verification, or failed) even when the awaiting handler is
@@ -352,10 +368,12 @@ class ApprovalService:
             raise  # process shutdown: the startup sweep marks the row uncertain
         except MCPClientError as exc:
             await self.store.finish_execution(approval_id, "failed", {"reason": str(exc)[:300]})
+            metrics.observe_approval_transition(tool, "failed")
             return {"status": "failed", "reason": str(exc)[:200]}
         if getattr(result, "is_error", False):
             reason = _text_of(result)[:300]
             await self.store.finish_execution(approval_id, "failed", {"reason": reason})
+            metrics.observe_approval_transition(tool, "failed")
             return {"status": "failed", "reason": reason}
 
         alerts_after = await asyncio.wait_for(
@@ -370,15 +388,11 @@ class ApprovalService:
         await self.store.finish_execution(
             approval_id, "executed", {"write_args": write_args}, verification
         )
+        metrics.observe_approval_transition(tool, "executed")
+        metrics.observe_approval_verification(tool, bool(verification.get("ok")))
         log.info("approval_write_recorded", approval_id=approval_id,
                  verification_ok=verification["ok"])
         return {"status": "executed", "verification": verification}
-
-    async def shutdown(self) -> None:
-        """Graceful shutdown: in-flight approval writes finish and persist
-        their outcome before anything is cancelled."""
-        if self._write_tasks:
-            await asyncio.gather(*self._write_tasks, return_exceptions=True)
 
     # -- uncertain recovery ----------------------------------------------------
 
@@ -416,6 +430,8 @@ class ApprovalService:
                      "reason": "read-back shows the alert was never acknowledged"},
                     None,
                 )
+            if resolved is not None:
+                metrics.observe_approval_transition(row.tool, resolved.status)
             log.info("uncertainty_resolved", approval_id=approval_id,
                      status=resolved.status if resolved else None)
             return resolved

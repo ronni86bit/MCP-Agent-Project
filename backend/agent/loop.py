@@ -11,12 +11,15 @@ operations whose status is uncertain after an interruption.
 from __future__ import annotations
 
 import asyncio
+import time
+
 import structlog
 
 from backend.agent import planner, plan_reviewer, selector, synthesizer
 from backend.agent.catalog import SERVER_ALLOWLISTS, ToolCatalog
 from backend.agent.evidence import EvidenceStore
 from backend.agent.executor import Executor
+from backend.agent.llm import adapter as llm_adapter
 from backend.agent.llm.adapter import LLMClient, LLMError
 from backend.agent.models import (
     ActionProposal,
@@ -31,12 +34,21 @@ from backend.agent.verifier import verify
 from backend.config import Settings
 from backend.mcp.client_manager import MultiMCPManager
 from backend.mcp.errors import MCPClientError
+from backend.observability import metrics
 from backend.reliability import CircuitState
 from pydantic import ValidationError
 from backend.security.approval_actions import WRITABLE_ACTIONS, eligible_alert_ids
 from backend.security.approval_service import ApprovalService
 
 log = structlog.get_logger(__name__)
+
+# Typed LLM failures -> bounded metric outcome labels (metrics.LLM_OUTCOMES)
+_LLM_OUTCOMES = {
+    llm_adapter.ProviderTimeoutError: "timeout",
+    llm_adapter.ProviderUnavailableError: "unavailable",
+    llm_adapter.ModelNotAvailableError: "model_not_available",
+    llm_adapter.MalformedOutputError: "malformed",
+}
 
 
 class InvestigationLoop:
@@ -68,6 +80,7 @@ class InvestigationLoop:
 
     async def run(self) -> InvestigationRecord:
         record = self.record
+        started = time.perf_counter()
         structlog.contextvars.bind_contextvars(
             investigation_id=record.investigation_id,
             request_id=record.request_id,
@@ -78,6 +91,7 @@ class InvestigationLoop:
                 async with self._manager_factory() as managers:
                     await self._investigate(managers)
         except TimeoutError:
+            metrics.observe_budget_exhausted("wall_clock")
             self._fail("wall-clock budget exceeded before completion")
         except LLMError as exc:
             self._fail(f"llm failure: {exc}")
@@ -88,6 +102,10 @@ class InvestigationLoop:
             self._fail(f"unexpected {type(exc).__name__}: {exc}")
         finally:
             structlog.contextvars.unbind_contextvars("investigation_id", "request_id")
+        # single terminal observation point: every exit path above has set a
+        # terminal status (hard cancellation propagates before this line, so
+        # interrupted investigations are never counted as complete/failed)
+        metrics.observe_investigation(record.status, time.perf_counter() - started)
         await self._checkpoint("status_" + record.status)
         return record
 
@@ -141,6 +159,7 @@ class InvestigationLoop:
             if self._finished_early:
                 break
             if len(self.record.steps) >= self.settings.max_investigation_steps:
+                metrics.observe_budget_exhausted("steps")
                 record.warnings.append("step budget exhausted; remaining plan steps were not executed")
                 break
             plan = record.plan
@@ -188,6 +207,7 @@ class InvestigationLoop:
             self._fail("no evidence could be collected; nothing to report")
             return
         if self._llm_calls_left() <= 0:
+            metrics.observe_budget_exhausted("llm_calls")
             self._fail("LLM call budget exhausted before synthesis")
             return
         report = await self._llm_call(
@@ -242,6 +262,7 @@ class InvestigationLoop:
             record.warnings.append("action proposal skipped: approval service unavailable")
             return
         if self._llm_calls_left() <= 0:
+            metrics.observe_budget_exhausted("llm_calls")
             record.warnings.append("action proposal skipped: LLM call budget exhausted")
             return
 
@@ -312,6 +333,7 @@ class InvestigationLoop:
         repair_feedback: str | None = None
         for attempt in (1, 2):
             if self._llm_calls_left() <= 0:
+                metrics.observe_budget_exhausted("llm_calls")
                 record.warnings.append("LLM call budget exhausted mid-investigation")
                 step_record.status = "skipped"
                 plan_step.status = "skipped"
@@ -547,6 +569,7 @@ class InvestigationLoop:
 
     async def _llm_call(self, purpose: str, coro):
         self.record.llm_calls += 1
+        started = time.perf_counter()
         log.info(
             "llm_call",
             investigation_id=self.record.investigation_id,
@@ -555,7 +578,15 @@ class InvestigationLoop:
             call_number=self.record.llm_calls,
             agent_state=self.record.states_visited[-1] if self.record.states_visited else None,
         )
-        return await coro
+        try:
+            result = await coro
+        except LLMError as exc:
+            metrics.observe_llm_call(
+                purpose, _LLM_OUTCOMES.get(type(exc), "error"), None
+            )
+            raise
+        metrics.observe_llm_call(purpose, "ok", time.perf_counter() - started)
+        return result
 
     def _llm_calls_left(self) -> int:
         return self.settings.max_llm_calls - self.record.llm_calls

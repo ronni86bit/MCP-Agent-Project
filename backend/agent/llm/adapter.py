@@ -23,6 +23,7 @@ from openai import APIConnectionError, APITimeoutError, AsyncOpenAI, BadRequestE
 from openai import APIStatusError
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from backend.observability import metrics
 from backend.reliability import retry_async
 
 log = structlog.get_logger(__name__)
@@ -128,18 +129,23 @@ class LLMClient(ABC):
 
     def _retry_transient(self, coro_factory: Callable[[], Awaitable[Any]], purpose: str) -> Any:
         """Bounded retry for transient provider failures only."""
-        return retry_async(
-            coro_factory,
-            attempts=1 + self._retry_attempts,
-            base_delay_seconds=self._retry_backoff_seconds,
-            retry_on=_TRANSIENT,
-            on_retry=lambda attempt, delay, exc: log.warning(
+
+        def _on_retry(attempt: int, delay: float, exc: BaseException) -> None:
+            metrics.observe_llm_retry(purpose)
+            log.warning(
                 "llm_transient_retry",
                 purpose=purpose,
                 attempt=attempt,
                 delay_seconds=round(delay, 2),
                 error=str(exc)[:160],
-            ),
+            )
+
+        return retry_async(
+            coro_factory,
+            attempts=1 + self._retry_attempts,
+            base_delay_seconds=self._retry_backoff_seconds,
+            retry_on=_TRANSIENT,
+            on_retry=_on_retry,
         )
 
 

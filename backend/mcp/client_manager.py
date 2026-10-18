@@ -31,6 +31,7 @@ from backend.mcp.errors import (
     ToolTimeoutError,
     TransportError,
 )
+from backend.observability import metrics
 from backend.reliability import CircuitBreaker, CircuitState, TokenBucket
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -319,6 +320,10 @@ class MultiMCPManager:
             )
             for server in factories
         }
+        # breaker gauges exist (closed) from construction, not from the first
+        # tool call, so a never-called server still reports its state
+        for server, breaker in self.breakers.items():
+            metrics.set_circuit_state(server, breaker.state.value)
 
     async def __aenter__(self) -> "MultiMCPManager":
         stack = AsyncExitStack()
@@ -350,17 +355,23 @@ class MultiMCPManager:
         manager = self.manager(server)
         breaker = self.breakers.get(server)
         bucket = self.buckets.get(server)
+        gate_prev = breaker.state if breaker is not None else None
         probe_state = breaker.before_call() if breaker is not None else None
+        if breaker is not None:
+            self._sync_breaker(server, breaker, gate_prev)
         try:
             if bucket is not None:
                 waited = await bucket.acquire()
                 if waited > 0:
+                    metrics.observe_rate_limit_wait(server, waited)
                     log.info("rate_limit_wait", server=server, waited_seconds=round(waited, 2))
             try:
                 result = await manager.call_tool(name, arguments)
             except (ToolTimeoutError, TransportError) as exc:
                 if breaker is not None:
+                    failure_prev = breaker.state
                     breaker.record_failure()
+                    self._sync_breaker(server, breaker, failure_prev)
                 raise
             except MCPClientError:
                 # server responded (validation/execution error): it is alive
@@ -368,7 +379,9 @@ class MultiMCPManager:
                     breaker.record_success()
                 raise
             if breaker is not None:
+                success_prev = breaker.state
                 breaker.record_success()
+                self._sync_breaker(server, breaker, success_prev)
             return result
         except BaseException:
             # Cancellation (or any escape that skips outcome recording) during a
@@ -379,3 +392,11 @@ class MultiMCPManager:
             if breaker is not None and probe_state == CircuitState.half_open:
                 breaker.release_probe()
             raise
+
+    @staticmethod
+    def _sync_breaker(server: str, breaker: CircuitBreaker, previous: CircuitState) -> None:
+        """Keep the breaker gauge and transition counter in step with state."""
+        if breaker.state != previous:
+            metrics.observe_circuit_transition(server, previous.value, breaker.state.value)
+        else:
+            metrics.set_circuit_state(server, breaker.state.value)

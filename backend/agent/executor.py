@@ -18,10 +18,14 @@ from backend.agent.catalog import ToolCatalog
 from backend.agent.evidence import EvidenceStore
 from backend.agent.models import ToolCallRequest
 from backend.mcp.client_manager import MultiMCPManager
-from backend.mcp.errors import MCPClientError
+from backend.mcp.errors import MCPClientError, ToolTimeoutError, TransportError
+from backend.observability import metrics
 from backend.reliability import CircuitOpenError
 
 log = structlog.get_logger(__name__)
+
+# typed execution failures -> bounded metric outcome labels (metrics.TOOL_OUTCOMES)
+_ERROR_OUTCOMES = {ToolTimeoutError: "timeout", TransportError: "transport"}
 
 
 class ValidationOutcome:
@@ -96,6 +100,7 @@ class Executor:
             result = await self.managers.call_tool(entry.server, entry.name, request.arguments)
         except CircuitOpenError as exc:
             duration = (time.perf_counter() - started) * 1000
+            metrics.observe_mcp_tool_call(entry.server, entry.name, "circuit_open", duration)
             log.warning(
                 "agent_tool_unavailable",
                 server=entry.server,
@@ -112,6 +117,9 @@ class Executor:
             )
         except MCPClientError as exc:
             duration = (time.perf_counter() - started) * 1000
+            metrics.observe_mcp_tool_call(
+                entry.server, entry.name, _ERROR_OUTCOMES.get(type(exc), "error"), duration
+            )
             log.warning(
                 "agent_tool_failed",
                 server=entry.server,
@@ -127,6 +135,7 @@ class Executor:
                 duration_ms=duration,
             )
         duration = (time.perf_counter() - started) * 1000
+        metrics.observe_mcp_tool_call(entry.server, entry.name, "ok", duration)
         payload = _payload_of(result)
         evidence = self.store.add(
             tool_name=entry.name,

@@ -101,5 +101,9 @@ def configure_logging(level: str = "INFO") -> None:
         ],
         wrapper_class=structlog.make_filtering_bound_logger(numeric_level),
         logger_factory=structlog.PrintLoggerFactory(file=sys.stderr),
-        cache_logger_on_first_use=True,
+        # never cache: a cached logger bakes in its processor chain at first
+        # use, which silently defeats structlog.testing.capture_logs() in any
+        # test that runs after an app was constructed in the same process.
+        # The per-event rebuild cost is irrelevant next to LLM/tool latency.
+        cache_logger_on_first_use=False,
     )
