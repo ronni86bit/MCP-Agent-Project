@@ -1,11 +1,16 @@
 """Phase 3+ endpoints: health + investigations (poll for results) + Phase 7
 approval endpoints (proposal lifecycle; SSE streaming is a later-phase
 addition). All approval decisions and executions route through the
-ApprovalService — routes never touch approval persistence directly."""
+ApprovalService — routes never touch approval persistence directly.
+
+Phase 8 Gate C adds root-level `/health` (liveness, dependency-free) and
+`/ready` (readiness, 30s cached dependency probe); `GET /api/health` keeps
+its existing Phase 3 response contract unchanged."""
 
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import JSONResponse
 
 from backend.agent.service import AgentService
 from backend.api.deps import get_service
@@ -29,6 +34,34 @@ from backend.security.approval_service import (
 )
 
 router = APIRouter(prefix="/api")
+
+# Root-level operational endpoints (Phase 8 Gate C). /api/health above is the
+# Phase 3 contract and is intentionally untouched by these.
+root_router = APIRouter()
+
+
+@root_router.get("/health")
+async def liveness() -> dict:
+    """Liveness: the process can serve requests.
+
+    Static by design — it probes nothing (no LLM, PostgreSQL, or MCP), so a
+    slow or hung dependency can never make this endpoint slow or hang."""
+    return {"status": "ok"}
+
+
+@root_router.get("/ready")
+async def readiness(service: AgentService = Depends(get_service)) -> JSONResponse:
+    """Readiness: required dependencies are available.
+
+    Required: LLM provider + every configured MCP server. The Postgres state
+    store is informational only (startup() degrades to in-memory operation).
+    Probes are cached for 30s with single-flight, so concurrent callers share
+    one probe instead of stampeding the dependencies."""
+    ready, checks, from_cache = await service.readiness()
+    return JSONResponse(
+        status_code=200 if ready else 503,
+        content={"status": "ready" if ready else "not_ready", "cached": from_cache, "checks": checks},
+    )
 
 _VALID_APPROVAL_STATUSES = (
     "proposed", "approved", "rejected", "expired", "superseded",

@@ -32,6 +32,7 @@ def create_app(service: AgentService | None = None) -> FastAPI:
 
     app = FastAPI(title="AI Operations Investigation Agent", version="0.3.0", lifespan=lifespan)
     app.add_middleware(CorrelationMiddleware)
+    app.include_router(routes.root_router)
     app.include_router(routes.router)
 
     # exact-path route (not app.mount): Starlette's Mount would 307-redirect

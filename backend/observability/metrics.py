@@ -170,6 +170,18 @@ def _safe(fn, *args, **kwargs) -> None:
 # -- observation helpers (the only surface other modules should call) ----------
 
 def observe_investigation(status: str, duration_seconds: float) -> None:
+    """Counted exactly once, at the single normal-return point of
+    `InvestigationLoop.run()` — i.e. the metric measures NORMAL TERMINAL
+    RETURNS with a loop-set status (`complete`, or `failed` via `_fail`:
+    wall-clock budget, LLM/MCP/unexpected failures).
+
+    It does NOT measure all persisted terminal statuses: a hard cancellation
+    (task.cancel(), e.g. AgentService.shutdown) raises CancelledError — a
+    BaseException the orchestrator boundary deliberately never converts — and
+    propagates BEFORE this line, so the run is not counted; the persisted row
+    is later marked `interrupted` by the startup sweep. Changing cancellation
+    behavior to increment a counter would be the tail wagging the dog (Gate C
+    decision, documented here and in the README)."""
     status = status if status in INVESTIGATION_STATUSES else "failed"
     _safe(lambda: investigations_total.labels(status=status).inc())
     _safe(lambda: investigation_duration_seconds.observe(max(float(duration_seconds), 0.0)))

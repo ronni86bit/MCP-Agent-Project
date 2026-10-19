@@ -8,8 +8,8 @@ evidence-grounded conclusions with human-approved actions.
 Canonical scenario: *"Why did today's sales drop?"* — answered by correlating sales data,
 a recent checkout deployment, rising checkout error rates, and the resulting alert/incident.
 
-**Status: Phase 7 — human-in-the-loop approvals (`acknowledge_alert` lifecycle: propose → decision → execute → verify).**
-(Phase 1: MCP fundamentals · Phase 2: postgres-mcp · Phase 3: agent runtime · Phase 4: multi-server correlation — complete.)
+**Status: Phase 8 — production observability (structured logging + correlation IDs + redaction, Prometheus metrics, liveness/readiness endpoints).**
+(Phase 1: MCP fundamentals · Phase 2: postgres-mcp · Phase 3: agent runtime · Phase 4: multi-server correlation · Phase 5: planning & state · Phase 6: reliability · Phase 7: human-in-the-loop approvals — complete.)
 
 - Engineering rules & architecture decisions: see [AGENTS.md](AGENTS.md).
 - Project guide: `MCP_Tool_Using_Production_Agent_Project_Guide.docx`.
@@ -185,6 +185,67 @@ GitHub configuration (optional): set `GITHUB_TOKEN` (fine-grained, read-only) an
 rate limits. `get_deployments` includes one record labeled `source=scenario-fixture` — the
 demo storyline's checkout deployment, not live GitHub state. Tests never touch live GitHub:
 they run the server against a local mock (`GITHUB_API_BASE_URL`).
+
+## Phase 8 — Production observability
+
+### Structured logging, correlation IDs, redaction
+
+Every process logs **structlog JSON to stderr** (stdout is reserved for MCP protocol
+traffic). Incoming requests get a correlation ID: a client-supplied `X-Request-ID` is
+validated against `^[a-z]{3,8}-[0-9a-f]{12}$` (a fresh one is generated otherwise), bound
+to the request and to every investigation's log context, returned in the response header,
+and always cleaned up. Log values pass through a redaction processor that recursively
+removes sensitive keys (case-insensitive: `authorization`, `api_key`, `token`, `password`,
+`secret`, …), strips credentials from URLs, never mutates the original payload, and never
+raises. Log level: `LOG_LEVEL` env (see `.env.example`).
+
+### Metrics (`/metrics`)
+
+Prometheus text format on the private registry — 14 `ops_agent_*` families with strictly
+bounded labels (server, tool, purpose, outcome, status — never IDs or free text):
+
+| Family | Type | What it counts |
+|---|---|---|
+| `ops_agent_investigations_total` | counter | terminal investigation outcomes (`complete`/`failed`) — normal terminal returns only (see caveat) |
+| `ops_agent_investigation_duration_seconds` | histogram | wall-clock duration of those runs |
+| `ops_agent_investigation_budget_exhausted_total` | counter | `wall_clock` / `steps` / `llm_calls` budget exhaustion events |
+| `ops_agent_llm_calls_total` | counter | LLM calls per purpose × outcome (`ok`/`timeout`/`unavailable`/`model_not_available`/`malformed`/`error`) |
+| `ops_agent_llm_call_duration_seconds` | histogram | successful LLM call latency per purpose |
+| `ops_agent_llm_retries_total` | counter | transient-failure retries inside the LLM adapter |
+| `ops_agent_mcp_tool_calls_total` | counter | tool executions per server × tool × outcome (`ok`/`circuit_open`/`timeout`/`transport`/`error`) |
+| `ops_agent_mcp_tool_duration_seconds` | histogram | tool execution latency |
+| `ops_agent_circuit_breaker_state` | gauge | per-server breaker state (0 closed, 1 half_open, 2 open) |
+| `ops_agent_circuit_breaker_transitions_total` | counter | breaker state transitions |
+| `ops_agent_rate_limit_waits_total` / `..._wait_seconds` | counter/histogram | token-bucket waits per server |
+| `ops_agent_approvals_total` | counter | approval lifecycle transitions into each status |
+| `ops_agent_approval_verification_total` | counter | post-write verification outcomes (`true`/`false`) |
+
+Instrumentation is non-invasive by rule: every observation is synchronous, wrapped so a
+metrics failure can only degrade to a debug log — it never changes an investigation, tool
+call, or approval outcome.
+
+**Caveat — investigation metric semantics:** the counter is observed at the single normal
+return of `InvestigationLoop.run()`, so it measures *normal terminal returns*
+(`complete`, or `failed` via the loop's `_fail`). A hard cancellation (`task.cancel()`,
+e.g. shutdown) propagates `CancelledError` — deliberately unconverted — before the
+observation line; such runs are **not** counted, and the startup sweep later persists them
+as `interrupted`. The metric therefore does not include every persisted terminal status.
+
+### Liveness & readiness
+
+| Endpoint | Semantics |
+|---|---|
+| `GET /health` | Liveness — static 200 while the process can serve; probes nothing, so a hung dependency can never hang it |
+| `GET /ready` | Readiness — 200 `ready` / 503 `not_ready`; probes the LLM provider and every configured MCP server, **cached 30 s with single-flight** (concurrent callers share one probe; no stampede) |
+| `GET /metrics` | Prometheus exposition (no redirect) |
+| `GET /api/health` | Phase 3 contract, unchanged: `{status, model, ollama, mcp_servers}` with live per-dependency detail |
+
+**Readiness dependency decision:** *required* — the LLM provider and all configured MCP
+servers (without them the loop cannot understand, plan, or collect any evidence).
+*Not required* — the PostgreSQL state store: `startup()` deliberately degrades to
+in-memory operation when it is unreachable and read-only investigations still work, so
+`/ready` reports `checks.state_store = {gating: false, mode: persistent | in_memory_fallback}`
+informationally and never gates on it.
 
 ## Layout
 

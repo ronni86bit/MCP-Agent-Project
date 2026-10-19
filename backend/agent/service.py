@@ -10,7 +10,8 @@ from __future__ import annotations
 
 import asyncio
 import sys
-from collections.abc import Callable
+import time
+from collections.abc import Awaitable, Callable
 
 import structlog
 
@@ -33,6 +34,75 @@ from backend.security.approval_service import (
 )
 
 log = structlog.get_logger(__name__)
+
+READINESS_TTL_SECONDS = 30.0
+
+
+class ReadinessCache:
+    """Single-flight TTL cache over the dependency probe (Phase 8 Gate C).
+
+    `get()` returns `(snapshot, from_cache)`. Within the TTL the cached
+    snapshot is served without probing. Concurrent callers that arrive while
+    a probe is in flight share that ONE probe — they wait on the lock and
+    then read the fresh snapshot — so N simultaneous `/ready` requests cause
+    exactly one probe, never a storm. The clock is injectable for
+    deterministic TTL tests.
+    """
+
+    def __init__(self, ttl_seconds: float = READINESS_TTL_SECONDS, *,
+                 clock: Callable[[], float] = time.monotonic):
+        if ttl_seconds <= 0:
+            raise ValueError("ttl_seconds must be > 0")
+        self.ttl_seconds = ttl_seconds
+        self._clock = clock
+        self._snapshot: dict | None = None
+        self._expires_at = float("-inf")
+        self._lock = asyncio.Lock()
+
+    async def get(self, probe: Callable[[], Awaitable[dict]]) -> tuple[dict, bool]:
+        snapshot = self._snapshot
+        if snapshot is not None and self._clock() < self._expires_at:
+            return snapshot, True
+        async with self._lock:
+            # re-check under the lock: a concurrent caller may have refreshed
+            if self._snapshot is not None and self._clock() < self._expires_at:
+                return self._snapshot, True
+            self._snapshot = await probe()
+            self._expires_at = self._clock() + self.ttl_seconds
+            return self._snapshot, False
+
+    def invalidate(self) -> None:
+        self._snapshot = None
+        self._expires_at = float("-inf")
+
+    @property
+    def probe_in_flight(self) -> bool:
+        return self._lock.locked()
+
+
+def readiness_from_health(snapshot: dict) -> tuple[bool, dict]:
+    """Derive readiness from an AgentService.health() snapshot (pure).
+
+    REQUIRED for readiness: the LLM provider and every configured MCP
+    server — without them the loop cannot understand, plan, or collect any
+    evidence, so the application cannot serve its core function.
+
+    NOT required: the Postgres state store. `startup()` deliberately
+    degrades to in-memory operation when it is unavailable and read-only
+    investigations still work, so its state is reported informationally
+    (see AgentService.readiness) and never gates readiness.
+    """
+    ollama = snapshot.get("ollama", "down: missing probe result")
+    mcp_servers = snapshot.get("mcp_servers", {})
+    checks: dict = {
+        "ollama": {"up": ollama == "up", "detail": ollama},
+        "mcp_servers": {
+            name: {"up": status.startswith("up"), "detail": status}
+            for name, status in mcp_servers.items()
+        },
+    }
+    ready = checks["ollama"]["up"] and all(c["up"] for c in checks["mcp_servers"].values())
+    return ready, checks
 
 
 def stdio_server_factory(settings: Settings, module: str, name: str) -> Callable[[], MCPClientManager]:
@@ -100,6 +170,7 @@ class AgentService:
             execution_timeout_seconds=settings.approval_execution_timeout_seconds,
         )
         self._tasks: set[asyncio.Task] = set()
+        self._readiness = ReadinessCache()
 
     async def startup(self) -> None:
         """Initialize the state schema and conservatively resolve anything a
@@ -221,6 +292,22 @@ class AgentService:
                 except Exception as exc:
                     server_status[server] = f"down: {type(exc).__name__}"
         return {"status": "ok", "model": self.llm.model_name, "ollama": ollama, "mcp_servers": server_status}
+
+    async def readiness(self) -> tuple[bool, dict, bool]:
+        """Readiness via the same dependency probe /api/health uses, cached
+        30s with single-flight (concurrent callers share one probe).
+
+        Returns (ready, checks, from_cache). The state-store entry is
+        informational only: startup() intentionally degrades to in-memory
+        operation when PostgreSQL is unavailable, so it never gates
+        readiness (see readiness_from_health for the required set)."""
+        snapshot, from_cache = await self._readiness.get(self.health)
+        ready, checks = readiness_from_health(snapshot)
+        checks["state_store"] = {
+            "gating": False,
+            "mode": "in_memory_fallback" if self.store is None else "persistent",
+        }
+        return ready, checks, from_cache
 
     async def shutdown(self) -> None:
         for task in list(self._tasks):

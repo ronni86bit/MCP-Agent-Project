@@ -1,4 +1,4 @@
-"""Development phase gate: tests + demos for Phases 1-7.
+"""Development phase gate: tests + demos for Phases 1-8.
 
     uv run python scripts/dev_check.py
 
@@ -36,7 +36,7 @@ def main() -> int:
     for label, cmd in checks:
         if run(label, cmd) != 0:
             return 1
-    print("\nPHASE GATE PASSED (Phases 1-7)")
+    print("\nPHASE GATE PASSED (Phases 1-8)")
     return 0
 
 
