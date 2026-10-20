@@ -29,6 +29,11 @@ def main() -> int:
         ("tests", [sys.executable, "-m", "pytest", "tests/unit", "tests/integration", "-q"]),
         ("phase1-demo", [sys.executable, "scripts/toy_client_demo.py"]),
         ("phase2-postgres-demo", [sys.executable, "scripts/postgres_demo.py"]),
+        # Phase 9: deterministic evaluation only — Ollama-marked tests stay
+        # excluded so model variance can never gate the project (Gate 2).
+        # Runs after the postgres demo so the seeded database exists.
+        ("evaluation-deterministic",
+         [sys.executable, "-m", "pytest", "tests/evaluation", "-m", "not ollama", "-q"]),
         ("model-smoke", [sys.executable, "scripts/model_smoke.py"]),
         ("phase5-state-demo", [sys.executable, "scripts/persistence_demo.py"]),
         ("agent-demo", [sys.executable, "scripts/agent_demo.py"]),

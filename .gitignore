@@ -21,3 +21,6 @@ dist/
 Thumbs.db
 .idea/
 .vscode/
+
+# Benchmark run outputs (docs stay; a validated run is committed at Gate 5)
+evaluation/results/*/
