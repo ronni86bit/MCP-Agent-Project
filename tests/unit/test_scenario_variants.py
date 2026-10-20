@@ -249,7 +249,7 @@ def test_incident_variant_rejects_deployment_attribution_and_accepts_incident_at
     attributed = _record(
         claims=[Claim(text="A deployment commit caused the revenue decline.",
                       evidence_ids=["ev-0001"])],
-        conclusion="The decline followed a deployment commit.",
+        conclusion="The revenue drop resulted from a deployment commit.",
         verification=_clean_verification(),
         compare_delta_pct=-56.0,
     )
@@ -258,6 +258,21 @@ def test_incident_variant_rejects_deployment_attribution_and_accepts_incident_at
     failed = {c.name for c in checks if not c.passed}
     assert "no_deployment_attribution" in failed
     assert not all(c.passed for c in checks)
+
+    # Gate 5 correction regression: MERELY MENTIONING a deployment (e.g.
+    # correctly reporting that none preceded the incident) must pass — the
+    # contract fails causal coupling, not the word itself.
+    mention_only = _record(
+        claims=[Claim(text="No deployment preceded the checkout incident in this window.",
+                      evidence_ids=["ev-0001"])],
+        conclusion="Revenue declined during the checkout incident; no deployment "
+                   "appears in the evidence, and the incident timeline aligns with the drop.",
+        verification=_clean_verification(),
+        compare_delta_pct=-56.0,
+    )
+    checks = cases_variants.variant_contract_checks(
+        "incident_without_deployment", mention_only, expected_servers=EXPECTED_SERVERS)
+    assert all(c.passed for c in checks), [c.model_dump() for c in checks if not c.passed]
 
     incident_ok = _record(
         claims=[Claim(text="Revenue fell 57% as the checkout incident opened.",

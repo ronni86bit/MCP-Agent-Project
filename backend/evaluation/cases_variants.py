@@ -60,6 +60,18 @@ _DECLINE_THRESHOLD_PCT = -20.0
 _HEALTHY_DELTA_PCT = -10.0
 
 _DEPLOYMENT_TERMS = re.compile(r"\b(deployment|deployed|deploy|commit|release)\b", re.IGNORECASE)
+# Gate 5 correction (reviewed): merely MENTIONING a deployment is permitted —
+# a correct V2 answer may legitimately state that no deployment preceded the
+# incident. The contract fails only when a deployment term CO-OCCURS, in the
+# same claim or the conclusion, with causal language linking it to the
+# disruption. Structural checks (no scenario deployment evidence, verifier
+# strictness, fixture truth) remain the primary burden.
+_CAUSAL_CONNECTORS = re.compile(
+    r"\b(cause[ds]?|causing|led to|leads? to|resulted in|resulting in|"
+    r"triggered(?: by)?|due to|because of|attributable to|to blame|"
+    r"broke|disrupted|responsible for)\b",
+    re.IGNORECASE,
+)
 
 
 def _causal_terms():
@@ -150,14 +162,16 @@ def variant_contract_checks(
         conclusion = record.report.conclusion if record.report else ""
         claims = record.report.claims if record.report else []
         attributed = [
-            c.text for c in claims if _DEPLOYMENT_TERMS.search(c.text)
-        ] + ([conclusion] if _DEPLOYMENT_TERMS.search(conclusion) else [])
+            c.text for c in claims
+            if _DEPLOYMENT_TERMS.search(c.text) and _CAUSAL_CONNECTORS.search(c.text)
+        ] + ([conclusion] if _DEPLOYMENT_TERMS.search(conclusion)
+             and _CAUSAL_CONNECTORS.search(conclusion) else [])
         checks.append(check(
             "no_deployment_attribution",
             not attributed,
-            f"texts attributing the incident to a deployment/commit/release: "
-            f"{attributed} (structurally impossible: no scenario deployment "
-            "evidence exists in this variant)",
+            f"texts coupling a deployment/commit/release to causal language: "
+            f"{attributed} (no scenario deployment evidence exists; mere "
+            "mention without causal linkage is permitted)",
         ))
     else:  # deployment_without_incident, no_anomaly: healthy variants
         checks.append(check(
@@ -223,7 +237,13 @@ async def case_variant(variant: str, *, llm, settings: Settings | None = None) -
             )
 
         # 3. the real investigation: in-process consumers see the variant via
-        # the scoped env patch; subprocesses via their explicit environments
+        # the scoped env patch; subprocesses via their explicit environments.
+        # manager_factory must yield an async context manager — wrap the
+        # factory dict in MultiMCPManager (a raw dict broke the run instantly:
+        # "'dict' object does not support the asynchronous context manager
+        # protocol", caught by the Gate 5 verification chain).
+        from backend.mcp.client_manager import MultiMCPManager
+
         recorder = RecordingLLM(llm)
         harness_error: BaseException | None = None
         record: InvestigationRecord | None = None
@@ -231,7 +251,8 @@ async def case_variant(variant: str, *, llm, settings: Settings | None = None) -
             with scoped_variant_env(variant):
                 service = AgentService(
                     settings, llm=recorder,
-                    manager_factory=lambda: variant_manager_factories(ctx),
+                    manager_factory=lambda: MultiMCPManager(
+                        variant_manager_factories(ctx)),
                 )
                 try:
                     record = service.start_investigation(QUESTION)

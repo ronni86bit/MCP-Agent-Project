@@ -173,7 +173,7 @@ def test_variant_cases_are_only_in_the_anti_causation_suite():
 
     deterministic_ids = [s.case_id for s in runner.build_case_specs()]
     assert not any(cid.startswith("V:") for cid in deterministic_ids)
-    anti_ids = [s.case_id for s in runner.build_anti_causation_specs(_scripted_stub())]
+    anti_ids = [s.case_id for s in runner.build_anti_causation_specs(lambda: _scripted_stub())]
     assert anti_ids == [
         "V:deployment_without_incident",
         "V:incident_without_deployment",

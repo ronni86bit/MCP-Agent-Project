@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import dataclasses
 import json
 import os
 import subprocess
@@ -67,11 +68,27 @@ CaseRunner = Callable[[], Awaitable[CaseResult]]
 
 @dataclass(frozen=True)
 class CaseSpec:
-    """One scheduled case execution (registry id + wired runner)."""
+    """One scheduled case execution (registry id + wired runner).
+
+    `repeat_index` labels stability repetitions of the same case; the row's
+    case_id stays the registry id so aggregation groups repeats naturally.
+    `wall_budget_seconds` arms the per-case wall guard: an over-running case
+    is recorded as an explicit failed row (`failure_layer="unknown"`,
+    `harness_timeout`) and the suite continues. Model-kind cases self-bound
+    via their internal poll deadline; the guard is the outer belt for hangs
+    that evade it (the underlying worker thread cannot be force-cancelled —
+    a documented limitation)."""
 
     case_id: str
     run: CaseRunner
     requires_postgres: bool = False
+    repeat_index: int = 0
+    wall_budget_seconds: float | None = None
+
+
+def expand_repeats(specs: list[CaseSpec], repeat: int) -> list[CaseSpec]:
+    return [dataclasses.replace(spec, repeat_index=i)
+            for i in range(repeat) for spec in specs]
 
 
 # -- filesystem primitives ------------------------------------------------------
@@ -115,9 +132,10 @@ class RowsWriter:
         self._seq = 0
         self.completed_seq: list[int] = []
 
-    def write(self, case: CaseResult) -> int:
+    def write(self, case: CaseResult, repeat_index: int = 0) -> int:
         self._seq += 1
-        row = {"schema_version": SCHEMA_VERSION, "seq": self._seq, **case.model_dump(mode="json")}
+        row = {"schema_version": SCHEMA_VERSION, "seq": self._seq,
+               "repeat_index": repeat_index, **case.model_dump(mode="json")}
         self._fh.write(json.dumps(row, ensure_ascii=False) + "\n")
         self._fh.flush()
         os.fsync(self._fh.fileno())
@@ -471,9 +489,24 @@ def _run_case_sync(spec: CaseSpec) -> CaseResult:
     return asyncio.run(spec.run())
 
 
+def _timeout_row(spec: CaseSpec, budget: float) -> CaseResult:
+    return CaseResult(
+        case_id=spec.case_id,
+        error_class="HarnessTimeout",
+        checks=[CheckResult(
+            name="case_completed_within_wall_budget", passed=False,
+            detail=f"case exceeded its {budget:.0f}s wall guard; layer unknown "
+                   "(the underlying worker may linger until its own deadlines)",
+        )],
+        failure_layer="unknown",
+        failure_diagnostics={"harness_timeout": True, "wall_budget_seconds": budget},
+    )
+
+
 async def run_suite(run_dir: Path, specs: list[CaseSpec]) -> list[tuple[int, CaseResult]]:
     """Execute the specs in order, writing one fsynced row per case. Per-case
-    exceptions are recorded as failed rows; a RUNNER-level interruption
+    exceptions are recorded as failed rows; a case exceeding its wall guard
+    becomes an explicit `unknown` row; a RUNNER-level interruption
     (KeyboardInterrupt/SystemExit/IO failure) writes the sidecar and
     re-raises — the manifest is then never written by the caller."""
     writer = RowsWriter(run_dir / "rows.jsonl")
@@ -482,7 +515,15 @@ async def run_suite(run_dir: Path, specs: list[CaseSpec]) -> list[tuple[int, Cas
         for spec in specs:
             started = time.perf_counter()
             try:
-                case = await asyncio.to_thread(_run_case_sync, spec)
+                if spec.wall_budget_seconds is not None:
+                    case = await asyncio.wait_for(
+                        asyncio.to_thread(_run_case_sync, spec),
+                        timeout=spec.wall_budget_seconds,
+                    )
+                else:
+                    case = await asyncio.to_thread(_run_case_sync, spec)
+            except TimeoutError:
+                case = _timeout_row(spec, spec.wall_budget_seconds or 0.0)
             except Exception as exc:  # the case failed -> explicit failed row
                 case = _failed_row(spec, exc)
             # the runner owns run-level case identity: parameterized variants
@@ -491,7 +532,7 @@ async def run_suite(run_dir: Path, specs: list[CaseSpec]) -> list[tuple[int, Cas
                 "case_id": spec.case_id,
                 "latency_ms": round(case.latency_ms or (time.perf_counter() - started) * 1000, 1),
             })
-            seq = writer.write(case)
+            seq = writer.write(case, repeat_index=spec.repeat_index)
             results.append((seq, case))
         return results
     except BaseException as exc:  # noqa: BLE001  (interrupt must leave the sidecar)
@@ -591,12 +632,16 @@ def _build_manifest(run_dir: Path, label: str, started_utc: str,
     }
 
 
-def build_model_specs(llm) -> list[CaseSpec]:
-    """Wire the model-dependent cases (Gate 3): real stdio servers, real LLM
-    wrapped by the case in RecordingLLM. Action mode stays disabled."""
+def build_model_specs(llm_factory: Callable[[], Any]) -> list[CaseSpec]:
+    """Wire the model-dependent cases (Gate 3): real stdio servers; EACH CASE
+    builds a fresh LLM client via `llm_factory` — cases run on separate event
+    loops, and a shared OpenAI-compatible client binds its connection pool to
+    the first loop that uses it (observed as 'Event loop is closed' on the
+    next case). Action mode stays disabled."""
     from backend.evaluation import cases_model
 
     settings = Settings(max_investigation_seconds=1200, max_llm_calls=16)
+    wall_budget = settings.max_investigation_seconds + 120.0
 
     async def _run_msel() -> CaseResult:
         from backend.agent.service import default_server_factories
@@ -605,25 +650,33 @@ def build_model_specs(llm) -> list[CaseSpec]:
         managers = MultiMCPManager(default_server_factories(get_settings()))
         async with managers:
             return await cases_model.case_msel(
-                llm=llm, managers=managers, settings=get_settings())
+                llm=llm_factory(), managers=managers, settings=get_settings())
 
     async def _run_mcanon() -> CaseResult:
-        return await cases_model.case_mcanon(llm=llm, settings=settings)
-
-    return [CaseSpec("M-SEL", _run_msel), CaseSpec("M-CANON", _run_mcanon)]
-
-
-def build_anti_causation_specs(llm) -> list[CaseSpec]:
-    """Wire the anti-causation variant cases (Gate 4). Each case provisions its
-    own isolated variant environment (unique seeded database, per-subprocess
-    scenario override) and requires PostgreSQL + Ollama."""
-    from backend.evaluation import cases_variants
-
-    async def _run(variant: str) -> CaseResult:
-        return await cases_variants.case_variant(variant, llm=llm)
+        return await cases_model.case_mcanon(llm=llm_factory(), settings=settings)
 
     return [
-        CaseSpec(f"V:{variant}", lambda v=variant: _run(v), requires_postgres=True)
+        CaseSpec("M-SEL", _run_msel, wall_budget_seconds=wall_budget),
+        CaseSpec("M-CANON", _run_mcanon, wall_budget_seconds=wall_budget),
+    ]
+
+
+def build_anti_causation_specs(llm_factory: Callable[[], Any]) -> list[CaseSpec]:
+    """Wire the anti-causation variant cases (Gate 4). Each case provisions its
+    own isolated variant environment (unique seeded database, per-subprocess
+    scenario override) and requires PostgreSQL + Ollama. Fresh LLM per case
+    (see build_model_specs)."""
+    from backend.evaluation import cases_variants
+
+    settings = cases_variants.CANONICAL_MODEL_SETTINGS
+    wall_budget = settings.max_investigation_seconds + 120.0
+
+    async def _run(variant: str) -> CaseResult:
+        return await cases_variants.case_variant(variant, llm=llm_factory())
+
+    return [
+        CaseSpec(f"V:{variant}", lambda v=variant: _run(v),
+                 requires_postgres=True, wall_budget_seconds=wall_budget)
         for variant in cases_variants_harness_names()
     ]
 
@@ -634,46 +687,69 @@ def cases_variants_harness_names() -> tuple[str, ...]:
     return _VARIANT_NAMES
 
 
-async def _build_real_llm():
-    from backend.agent.llm.adapter import LLMError, OpenAICompatLLM
+def _real_llm_factory() -> Callable[[], Any]:
+    """A zero-arg factory building FRESH LLM clients — one per case. Cases run
+    on separate event loops (worker threads), and a single shared OpenAI-
+    compatible client binds its httpx connection pool to the first loop that
+    uses it; sharing breaks later cases with 'Event loop is closed' (observed
+    in the Gate 5 verification chain)."""
+    from backend.agent.llm.adapter import OpenAICompatLLM
 
     settings = get_settings()
-    llm = OpenAICompatLLM(
-        base_url=f"{settings.ollama_host}/v1",
-        model=settings.ollama_model,
-        timeout_seconds=settings.llm_timeout_seconds,
-        temperature=settings.llm_temperature,
-        retry_attempts=settings.llm_retry_attempts,
-        retry_backoff_seconds=settings.llm_retry_backoff_seconds,
-    )
+
+    def _make() -> OpenAICompatLLM:
+        return OpenAICompatLLM(
+            base_url=f"{settings.ollama_host}/v1",
+            model=settings.ollama_model,
+            timeout_seconds=settings.llm_timeout_seconds,
+            temperature=settings.llm_temperature,
+            retry_attempts=settings.llm_retry_attempts,
+            retry_backoff_seconds=settings.llm_retry_backoff_seconds,
+        )
+
+    return _make
+
+
+async def _verified_llm_factory() -> Callable[[], Any]:
+    """Fail fast when Ollama is unreachable, then hand back the per-case
+    factory (the probe uses a throwaway client)."""
+    from backend.agent.llm.adapter import LLMError
+
+    settings = get_settings()
     try:
-        await llm.check_provider()
+        await _real_llm_factory()().check_provider()
     except LLMError as exc:
         raise RuntimeError(
             f"the model suite requires Ollama ({settings.ollama_model} at "
             f"{settings.ollama_host}); it is unreachable: {exc}"
         ) from exc
-    return llm
+    return _real_llm_factory()
 
 
 async def main_async(args: argparse.Namespace) -> int:
+    repeat = max(1, int(getattr(args, "repeat", 1)))
     if args.suite == "deterministic":
         specs = build_case_specs()
+        if repeat > 1:
+            print("[run_benchmark] note: --repeat applies to model-kind suites; "
+                  "the deterministic suite runs each case once")
         if any(s.requires_postgres for s in specs):
             await _require_postgres()
         model_block = None
     else:
-        llm = await _build_real_llm()
+        llm_factory = await _verified_llm_factory()
         if args.suite == "anti-causation":
             await _require_postgres()
-            specs = build_anti_causation_specs(llm)
+            specs = build_anti_causation_specs(llm_factory)
         else:
-            specs = build_model_specs(llm)
+            specs = build_model_specs(llm_factory)
+        specs = expand_repeats(specs, repeat)
         model_block = _real_model_block()
     out_dir = Path(args.out) if args.out else DEFAULT_OUT_DIR
     run_dir = build_run_dir(out_dir, args.label)
     started_utc = _utc()
-    print(f"[run_benchmark] suite={args.suite} run_dir={run_dir}")
+    print(f"[run_benchmark] suite={args.suite} run_dir={run_dir}"
+          + (f" repeat={repeat}" if repeat > 1 else ""))
     results = await run_suite(run_dir, specs)
     manifest = _build_manifest(run_dir, args.label, started_utc, results,
                                suite=args.suite, model=model_block)
@@ -686,6 +762,12 @@ async def main_async(args: argparse.Namespace) -> int:
             failed = [c.name for c in case.checks if not c.passed]
             print(f"[run_benchmark]   FAILED {case.case_id} "
                   f"[{case.failure_layer}]: {failed}")
+
+    # aggregation + human-readable summary (Gate 5); rendered from the
+    # manifest-bearing run directory, after the success marker exists
+    from backend.evaluation.report import aggregate_run, render_markdown
+    (run_dir / "summary.md").write_text(
+        render_markdown([aggregate_run(run_dir)], []), encoding="utf-8")
     print(f"[run_benchmark] manifest: {run_dir / 'manifest.json'}")
     return 0 if summary["failed"] == 0 else 1
 
@@ -701,6 +783,9 @@ def main() -> int:
                         help="short label appended to the run directory name")
     parser.add_argument("--out", default=None,
                         help=f"output root (default: {DEFAULT_OUT_DIR})")
+    parser.add_argument("--repeat", type=int, default=1,
+                        help="repetitions per case (stability data; model-kind "
+                             "suites only; each repeat gets its own row)")
     args = parser.parse_args()
     try:
         return asyncio.run(main_async(args))

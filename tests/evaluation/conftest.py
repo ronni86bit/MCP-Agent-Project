@@ -30,8 +30,12 @@ def _ollama_ready() -> bool:
         return False
 
 
-@pytest.fixture(scope="session")
+@pytest.fixture
 def real_llm() -> LLMClient:
+    """Function-scoped ON PURPOSE: the OpenAI-compatible client's httpx pool
+    binds to the first event loop that uses it, and pytest-asyncio gives each
+    test a fresh loop — a session-scoped client breaks the second test with
+    'Event loop is closed' (observed in the Gate 5 verification chain)."""
     if not _ollama_ready():
         pytest.skip(
             "Ollama or the configured model is unavailable — start Ollama and "

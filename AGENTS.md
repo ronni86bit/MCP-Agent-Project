@@ -108,12 +108,11 @@ docker/                                build files, nginx.conf, initdb
 3. Agent runtime (FastAPI + Ollama adapter + MCP client; postgres-only investigations; tool-call smoke eval) — **done**
 4. Multi-server (monitoring-mcp fixtures, then github-mcp; cross-system correlation) — **done**
 5. Planning & state (explicit plans, persisted investigation state, evidence memory) — **done**
-6. Reliability (validation, retries, timeouts, rate limits, partial-failure recovery) ← **current (implemented, pending review)**
-6. Reliability (validation, retries, timeouts, rate limits, partial-failure recovery)
-7. Human-in-the-loop (read/write policy split; `acknowledge_alert` approval flow)
-8. Observability (logs, metrics, traces, audit, UI trace view)
-9. Evaluation (benchmark incl. recovery scenarios)
-10. Deployment & portfolio (containers, docs, demo)
+6. Reliability (validation, retries, timeouts, rate limits, partial-failure recovery) — **done**
+7. Human-in-the-loop (read/write policy split; `acknowledge_alert` approval flow) — **done**
+8. Observability (structured logs + redaction, correlation IDs, Prometheus metrics, liveness/readiness) — **done**
+9. Evaluation (benchmark incl. anti-causation scenario variants, stability, failure classification) — **done**
+10. Deployment & portfolio (containers, docs, demo) ← **next**
 
 ## 10. Environment notes
 

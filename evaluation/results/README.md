@@ -9,8 +9,10 @@ anything).
 
 ```
 evaluation/results/<UTC>_<label>/
-├── rows.jsonl           one line per COMPLETED case (flushed + fsynced per row)
+├── rows.jsonl           one line per COMPLETED case (flushed + fsynced per row);
+│                        includes repeat_index for stability repetitions
 ├── manifest.json        written LAST, atomically — the ONLY success marker
+├── summary.md           aggregated view (Gate 5), rendered after the manifest
 └── run_incomplete.json  sidecar for a HANDLED interruption (status, completed_seq, reason)
 ```
 
@@ -55,7 +57,13 @@ checks), `summary` (`cases`/`passed`/`failed`).
 
 Atomicity: `manifest.json` is written to `manifest.json.tmp`, fsynced, then
 `os.replace`d — readers observe either the previous state (absent) or the
-complete file, never a partial one.
+complete file, never a partial one. After the manifest, `summary.md` is
+rendered by `backend/evaluation/report.py`: strict pass rate, pass rate
+excluding infrastructure failures, nearest-rank p50/p95 latency, token sums
+with missing-usage accounting, failure-layer breakdown, and per-case repeat
+stability. Incomplete runs never enter a summary's statistics; aggregated
+runs with different code revisions or dirty-tree state are flagged as
+incomparable (manifests record `code_commit` and `code_dirty`).
 
 ## Incomplete runs
 
@@ -75,11 +83,15 @@ complete file, never a partial one.
 
 ## Suites
 
-- `deterministic` (Phase 9 Gate 2): scripted-LLM cases only; no Ollama, no
-  network; PostgreSQL required for `D-SEL` and `D-APPROVE` (the runner fails
-  fast with instructions if it is unreachable). Case ids: `D-SEL`, `D-EV`,
+- `deterministic`: scripted-LLM cases only; no Ollama, no network; PostgreSQL
+  required for `D-SEL` and `D-APPROVE` (the runner fails fast with
+  instructions if it is unreachable). Case ids: `D-SEL`, `D-EV`,
   `D-GROUND`, `D-GAP`, `D-FAIL`, `D-CIRCUIT`, `D-BUDGET:{llm_calls,steps,wall_clock}`,
-  `D-APPROVE`, `D-CANCEL` — the registry ids of
-  `backend/evaluation/cases_deterministic.py` (D-BUDGET runs once per budget class).
-- Model-dependent suites (`model`, anti-causation, stability) arrive with
-  Gate 3/4 and will use the same directory contract.
+  `D-APPROVE`, `D-CANCEL`.
+- `model` (Phase 9 Gate 3): `M-SEL` (six selection probes, real model) and
+  `M-CANON` (canonical investigation + fixture-truth checks). Requires
+  Ollama; `--repeat N` adds stability repetitions.
+- `anti-causation` (Phase 9 Gate 4): `V:deployment_without_incident`,
+  `V:incident_without_deployment`, `V:no_anomaly` — scenario-variant
+  investigations with per-case isolated environments and structural
+  anti-causation contracts. Requires PostgreSQL + Ollama.

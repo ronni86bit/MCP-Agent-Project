@@ -239,11 +239,13 @@ def test_schema_round_trip_keeps_passed_derived():
 # -- requirement 9: dev_check wiring ------------------------------------------------
 
 
-def test_dev_check_includes_deterministic_evaluation_and_keeps_label():
+def test_dev_check_includes_deterministic_evaluation_and_phase_1_9_label():
+    """Gate 5 flipped the label once all Phase 9 acceptance criteria passed;
+    this now pins the NEW invariant (and guards against a silent revert)."""
     source = (ROOT / "scripts" / "dev_check.py").read_text(encoding="utf-8")
     assert '"tests/evaluation", "-m", "not ollama"' in source
-    assert "PHASE GATE PASSED (Phases 1-8)" in source
-    assert "PHASE GATE PASSED (Phases 1-9)" not in source
+    assert "PHASE GATE PASSED (Phases 1-9)" in source
+    assert "PHASE GATE PASSED (Phases 1-8)" not in source
 
     collected = subprocess_collect()
     assert "test_deterministic_runner.py" in collected

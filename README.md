@@ -247,6 +247,90 @@ in-memory operation when it is unreachable and read-only investigations still wo
 `/ready` reports `checks.state_store = {gating: false, mode: persistent | in_memory_fallback}`
 informationally and never gates on it.
 
+## Phase 9 — Evaluation & benchmarking
+
+A reproducible benchmark harness (`scripts/run_benchmark.py`) over a fixed case
+registry (`backend/evaluation/`), scored by pure graders that reuse the
+verifier and the preserved smoke/canonical assertions.
+
+### Suites and commands
+
+```bash
+uv run python scripts/run_benchmark.py --suite deterministic --label L   # scripted, no Ollama, seconds
+uv run python scripts/run_benchmark.py --suite model --label L           # M-SEL probes + M-CANON (real model, ~20-40 min)
+uv run python scripts/run_benchmark.py --suite anti-causation --label L  # three scenario-variant investigations (~20-30 min)
+uv run python scripts/run_benchmark.py --suite model --label L --repeat 3  # stability repetitions
+```
+
+- `deterministic`: scripted LLM + stub/failing doubles; PostgreSQL needed for
+  two cases; **no Ollama**; part of the project gate via
+  `pytest tests/evaluation -m "not ollama"`.
+- `model` / `anti-causation`: real Ollama investigations over real MCP
+  subprocesses; **never gate-blocking**; Ollama-marked tests follow the same
+  rule. Model runs keep action mode disabled — no write path.
+- `--repeat N` re-runs each model-kind case N times (per-repeat rows with
+  `repeat_index`) for stability statistics.
+
+### Results format
+
+Each run writes `evaluation/results/<UTC>_<label>/`: `rows.jsonl` (one
+fsynced line per completed case), `manifest.json` (written **last**,
+atomically — the only success marker; records code commit **and whether the
+working tree was dirty**, scenario name/seed, model identity and endpoint
+without credentials, budgets), `summary.md` (aggregated view), and
+`run_incomplete.json` after a handled interruption. Runs are append-only; a
+directory collision aborts. Run outputs are gitignored; the schema lives in
+`evaluation/results/README.md`.
+
+### Aggregation semantics
+
+`backend/evaluation/report.py` aggregates only manifest-bearing, schema-valid
+runs. Incomplete runs (no manifest) are listed with their reason —
+sidecar-recorded interruption or "incomplete-assumed" after a hard kill — and
+excluded from every statistic. Per run: strict pass rate,
+**pass rate excluding infrastructure failures** (infra noise is visible,
+never laundered into the model score), nearest-rank p50/p95 latency, token
+sums with missing-usage rows counted, per-case repeat stability, and the
+failure-layer breakdown. Runs with different code revisions or dirty-tree
+state are flagged as incomparable.
+
+### Failure classification
+
+Conservative and evidence-based (`failure_classification.py`): `infra` only on
+observed typed infrastructure errors or verified dependency/coherence
+failures; `budget` only on recorded budget exhaustion; `reasoning` only when
+infrastructure is verified healthy AND the run reached a terminal state AND
+grading failed; `unknown` for harness cancellations, timeouts, and ambiguous
+partials. An exception alone is never classified as reasoning.
+
+### Anti-causation variants
+
+Three deterministic scenario variants (`tests/evaluation/scenarios/`) split
+the canonical story apart: `deployment_without_incident` (a deployment ships,
+nothing breaks), `incident_without_deployment` (a real outage with no
+release), and `no_anomaly` (calibration). Each case verifies cross-store
+coherence (monitoring/github/postgres serve the same variant) **before** the
+model runs and grades structurally afterwards: verifier strictness, fixture
+truth bands (thresholds mirrored from the storyline tests), causal language
+via the verifier's own vocabulary, and — for the incident variant — refusal
+of causal deployment attribution (mentioning a deployment is permitted;
+coupling it to causal language is not).
+
+### Budgets, limitations, and executed-vs-unexecuted status
+
+Wall budgets: model/anti-causation cases carry a per-case wall guard
+(`MAX_INVESTIGATION_SECONDS` + 120 s); an over-running case becomes an
+explicit `unknown` row. Realistic single-pass runtimes on the reference
+laptop (i5-1135G7, CPU-only): selection probes 8–95 s each, a canonical or
+variant investigation 6–15 min, `--suite model` ≈ 20–40 min, `--suite
+anti-causation` ≈ 20–30 min. Limitations: qwen3:4b selection is varianced
+(temperature 0.1, no seed) — stability is measured, not eliminated;
+GITHUB_TOKEN is unset so GitHub runs unauthenticated (rate-limit failures are
+classified `infra`); a hard kill leaves an incomplete run that is reported
+but never reconstructed. Which model benchmarks were actually executed is
+recorded by the committed runs under `evaluation/results/` — see their
+manifests; unexecuted suites are not claimed anywhere.
+
 ## Layout
 
 `backend/` (api, agent, mcp servers + client, security, observability) · `frontend/` (React/Vite console, later phases) · `tests/` (unit, integration, e2e, evaluation) · `scripts/` · `docker/` + `docker-compose.yml`.

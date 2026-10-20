@@ -321,7 +321,7 @@ def test_model_cases_are_not_in_the_deterministic_suite():
 
     deterministic_ids = [s.case_id for s in runner.build_case_specs()]
     assert not any(cid.startswith("M-") for cid in deterministic_ids)
-    model_ids = [s.case_id for s in runner.build_model_specs(_scripted([]))]
+    model_ids = [s.case_id for s in runner.build_model_specs(lambda: _scripted([]))]
     assert model_ids == ["M-SEL", "M-CANON"]
 
 

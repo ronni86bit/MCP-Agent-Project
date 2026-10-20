@@ -41,7 +41,7 @@ def main() -> int:
     for label, cmd in checks:
         if run(label, cmd) != 0:
             return 1
-    print("\nPHASE GATE PASSED (Phases 1-8)")
+    print("\nPHASE GATE PASSED (Phases 1-9)")
     return 0
 
 
