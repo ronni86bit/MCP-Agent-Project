@@ -46,7 +46,20 @@ class MonitoringFixtures(BaseModel):
 
 def _hourly_points(spec: ScenarioSpec, service: str, rng: random.Random) -> list[dict[str, Any]]:
     profile = _SERVICE_PROFILE.get(service, (600, 120.0, 0.3))
-    deployed = spec.deployment.deployed_at_utc if service == spec.deployment.service else None
+    # degradation follows the STORY, not any single record: the canonical
+    # scenario degrades the deployed service from deployment time; variants
+    # without a monitoring incident are healthy everywhere (a deployment with
+    # no effect), and an incident without a deployment degrades the incident's
+    # service from incident start. Canonical output is unchanged (all present).
+    if spec.monitoring.incident is None:
+        degraded_from = None
+    elif spec.deployment is not None and service == spec.deployment.service:
+        degraded_from = spec.deployment.deployed_at_utc
+    elif service == spec.monitoring.incident.service:
+        degraded_from = spec.monitoring.incident.started_at_utc
+    else:
+        degraded_from = None
+    deployed = degraded_from
     points: list[dict[str, Any]] = []
     current = datetime.combine(spec.start_date, datetime.min.time(), tzinfo=timezone.utc)
     end = datetime.combine(spec.end_date, datetime.min.time(), tzinfo=timezone.utc) + timedelta(days=1)
@@ -105,12 +118,16 @@ def build_monitoring_fixtures(spec: ScenarioSpec) -> MonitoringFixtures:
             "acknowledged_by": None,
         }
 
+    # the ALT-1044 catalog record is background noise present in every variant;
+    # the storyline alert/incident appear only when the spec defines them
     alerts = [
         _alert("ALT-1044", "catalog", "latency_p95_ms", "warning",
                "2026-09-15T09:12:00Z", "catalog latency_p95_ms above 150ms for 20m"),
-        _alert(alert.id, alert.service, alert.metric, alert.severity,
-               alert.fired_at_utc.isoformat().replace("+00:00", "Z"), alert.message),
     ]
+    if alert is not None:
+        alerts.append(_alert(alert.id, alert.service, alert.metric, alert.severity,
+                             alert.fired_at_utc.isoformat().replace("+00:00", "Z"),
+                             alert.message))
     incidents = [
         {
             "id": "INC-0987",
@@ -121,7 +138,9 @@ def build_monitoring_fixtures(spec: ScenarioSpec) -> MonitoringFixtures:
             "title": "Catalog latency elevated",
             "summary": "Sustained catalog latency after a cache flush; resolved after warmup.",
         },
-        {
+    ]
+    if incident is not None:
+        incidents.append({
             "id": incident.id,
             "service": incident.service,
             "severity": incident.severity,
@@ -132,8 +151,7 @@ def build_monitoring_fixtures(spec: ScenarioSpec) -> MonitoringFixtures:
             ),
             "title": incident.title,
             "summary": incident.summary,
-        },
-    ]
+        })
     return MonitoringFixtures(
         services=list(spec.monitoring.services), series=series, alerts=alerts, incidents=incidents
     )

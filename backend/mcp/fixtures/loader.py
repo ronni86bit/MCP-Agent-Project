@@ -7,6 +7,7 @@ the three systems' windows mutually coherent.
 
 from __future__ import annotations
 
+import os
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -15,6 +16,11 @@ import yaml
 from pydantic import BaseModel, ConfigDict, model_validator
 
 DEFAULT_SCENARIO_PATH = Path(__file__).resolve().parent / "scenario.yaml"
+
+# Evaluation scenario-variant override (Phase 9 Gate 4). When set, it points
+# at an alternate spec file; unset means the canonical scenario, unchanged.
+# Subprocess MCP servers receive it through their per-process environment.
+VARIANT_ENV_VAR = "OPS_SCENARIO_PATH"
 
 
 class Window(BaseModel):
@@ -100,8 +106,11 @@ class Monitoring(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     services: list[str]
-    alert: MonitoringAlert
-    incident: MonitoringIncident
+    # Optional for evaluation scenario variants (e.g. "deployment without
+    # incident"): the canonical scenario always defines both, so canonical
+    # parsing is unchanged. Generators treat None as "no such record".
+    alert: MonitoringAlert | None = None
+    incident: MonitoringIncident | None = None
 
 
 class ScenarioSpec(BaseModel):
@@ -114,7 +123,9 @@ class ScenarioSpec(BaseModel):
     baseline: Window
     incident: Incident
     impact: Impact
-    deployment: Deployment
+    # Optional for evaluation variants ("incident without deployment",
+    # "no anomaly"); the canonical scenario always defines it.
+    deployment: Deployment | None = None
     monitoring: Monitoring
 
     @model_validator(mode="after")
@@ -133,23 +144,35 @@ class ScenarioSpec(BaseModel):
                 )
         if not self.monitoring.services:
             raise ValueError("monitoring.services must not be empty")
-        if self.deployment.service not in self.monitoring.services:
-            raise ValueError("deployment.service must be one of monitoring.services")
-        if self.monitoring.alert.service not in self.monitoring.services:
-            raise ValueError("monitoring.alert.service must be one of monitoring.services")
-        if self.monitoring.incident.service not in self.monitoring.services:
-            raise ValueError("monitoring.incident.service must be one of monitoring.services")
+        services = self.monitoring.services
+        if self.deployment is not None:
+            if self.deployment.service not in services:
+                raise ValueError("deployment.service must be one of monitoring.services")
+        if self.monitoring.alert is not None:
+            if self.monitoring.alert.service not in services:
+                raise ValueError("monitoring.alert.service must be one of monitoring.services")
+        if self.monitoring.incident is not None:
+            if self.monitoring.incident.service not in services:
+                raise ValueError("monitoring.incident.service must be one of monitoring.services")
 
         range_start = datetime.combine(self.start_date, datetime.min.time(), tzinfo=timezone.utc)
         incident_start = datetime.combine(self.incident.start_date, datetime.min.time(), tzinfo=timezone.utc)
-        deployed = self.deployment.deployed_at_utc
-        if not range_start <= deployed < incident_start:
-            raise ValueError("deployment must fall inside the scenario range and before the incident window")
-        if not deployed < self.monitoring.alert.fired_at_utc <= self.monitoring.incident.started_at_utc:
-            raise ValueError("timeline must run deployment -> alert -> incident open")
-        resolved = self.monitoring.incident.resolved_at_utc
-        if resolved is not None and resolved <= self.monitoring.incident.started_at_utc:
-            raise ValueError("incident resolution must follow the incident start")
+        if self.deployment is not None:
+            deployed = self.deployment.deployed_at_utc
+            if not range_start <= deployed < incident_start:
+                raise ValueError("deployment must fall inside the scenario range and before the incident window")
+        # the canonical deployment -> alert -> incident ordering is enforced
+        # whenever the involved records exist; variants may drop earlier links
+        if self.deployment is not None and self.monitoring.alert is not None:
+            if not self.deployment.deployed_at_utc < self.monitoring.alert.fired_at_utc:
+                raise ValueError("timeline must run deployment -> alert -> incident open")
+        if self.monitoring.alert is not None and self.monitoring.incident is not None:
+            if not self.monitoring.alert.fired_at_utc <= self.monitoring.incident.started_at_utc:
+                raise ValueError("timeline must run deployment -> alert -> incident open")
+        if self.monitoring.incident is not None:
+            resolved = self.monitoring.incident.resolved_at_utc
+            if resolved is not None and resolved <= self.monitoring.incident.started_at_utc:
+                raise ValueError("incident resolution must follow the incident start")
         return self
 
     @property
@@ -165,6 +188,12 @@ class ScenarioSpec(BaseModel):
 
 
 def load_scenario(path: str | Path | None = None) -> ScenarioSpec:
-    source = Path(path) if path is not None else DEFAULT_SCENARIO_PATH
+    """Load a scenario spec. Resolution order: explicit `path` argument, then
+    the OPS_SCENARIO_PATH environment variable (evaluation variants; read at
+    call time so scoped overrides work in-process and subprocess servers
+    inherit it via their environment), then the canonical scenario.yaml."""
+    if path is None:
+        path = os.environ.get(VARIANT_ENV_VAR) or DEFAULT_SCENARIO_PATH
+    source = Path(path)
     raw: dict[str, Any] = yaml.safe_load(source.read_text(encoding="utf-8"))["scenario"]
     return ScenarioSpec.model_validate(raw)

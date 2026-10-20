@@ -613,6 +613,27 @@ def build_model_specs(llm) -> list[CaseSpec]:
     return [CaseSpec("M-SEL", _run_msel), CaseSpec("M-CANON", _run_mcanon)]
 
 
+def build_anti_causation_specs(llm) -> list[CaseSpec]:
+    """Wire the anti-causation variant cases (Gate 4). Each case provisions its
+    own isolated variant environment (unique seeded database, per-subprocess
+    scenario override) and requires PostgreSQL + Ollama."""
+    from backend.evaluation import cases_variants
+
+    async def _run(variant: str) -> CaseResult:
+        return await cases_variants.case_variant(variant, llm=llm)
+
+    return [
+        CaseSpec(f"V:{variant}", lambda v=variant: _run(v), requires_postgres=True)
+        for variant in cases_variants_harness_names()
+    ]
+
+
+def cases_variants_harness_names() -> tuple[str, ...]:
+    from backend.evaluation.scenario_harness import _VARIANT_NAMES
+
+    return _VARIANT_NAMES
+
+
 async def _build_real_llm():
     from backend.agent.llm.adapter import LLMError, OpenAICompatLLM
 
@@ -643,7 +664,11 @@ async def main_async(args: argparse.Namespace) -> int:
         model_block = None
     else:
         llm = await _build_real_llm()
-        specs = build_model_specs(llm)
+        if args.suite == "anti-causation":
+            await _require_postgres()
+            specs = build_anti_causation_specs(llm)
+        else:
+            specs = build_model_specs(llm)
         model_block = _real_model_block()
     out_dir = Path(args.out) if args.out else DEFAULT_OUT_DIR
     run_dir = build_run_dir(out_dir, args.label)
@@ -667,10 +692,11 @@ async def main_async(args: argparse.Namespace) -> int:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--suite", choices=["deterministic", "model"],
+    parser.add_argument("--suite", choices=["deterministic", "model", "anti-causation"],
                         default="deterministic",
                         help="deterministic: scripted, no Ollama; model: real "
-                             "Ollama runs (M-SEL probes + M-CANON investigation)")
+                             "Ollama runs (M-SEL probes + M-CANON investigation); "
+                             "anti-causation: three scenario-variant investigations")
     parser.add_argument("--label", required=True,
                         help="short label appended to the run directory name")
     parser.add_argument("--out", default=None,

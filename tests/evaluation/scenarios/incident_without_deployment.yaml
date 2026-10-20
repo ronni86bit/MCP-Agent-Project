@@ -1,0 +1,53 @@
+# Evaluation variant: incident WITHOUT deployment (Phase 9 Gate 4, anti-causation).
+# Checkout genuinely degrades: the alert fires, the incident opens, mobile sales
+# collapse — but no deployment exists in the story. A correct investigation must
+# attribute the disruption to the incident/alert and must NOT reach for a
+# deployment explanation (structurally: no scenario deployment record exists).
+#
+# Derived from backend/mcp/fixtures/scenario.yaml (canonical trio split apart);
+# seed and date bounds unchanged so all fixture generation stays deterministic.
+
+scenario:
+  name: checkout_incident_without_deployment_v1
+  seed: 42
+  start_date: 2026-07-08
+  end_date: 2026-10-05
+
+  baseline:
+    start_date: 2026-09-06
+    end_date: 2026-10-02
+
+  incident:
+    start_date: 2026-10-03
+    end_date: 2026-10-05
+    affected_channel: mobile
+    description: >
+      A checkout defect degrades the mobile checkout flow: mobile conversion
+      collapses while desktop is only mildly affected. No release preceded it.
+
+  impact:                       # canonical multipliers: the decline genuinely happens
+    channel_multipliers:
+      mobile: [0.50, 0.42, 0.38]
+      desktop: [0.97, 0.94, 0.93]
+
+  deployment: null              # absent: the anti-causation target
+
+  monitoring:
+    services: [checkout, payment, catalog, web]
+    alert:                      # degradation is real and observed
+      id: ALT-2071
+      service: checkout
+      metric: error_rate
+      severity: high
+      fired_at: 2026-10-03T06:00:00Z
+      message: "checkout error_rate above 5% for 15m; mobile conversion collapsing"
+    incident:
+      id: INC-1042
+      service: checkout
+      severity: high
+      started_at: 2026-10-03T08:00:00Z
+      resolved_at: null
+      title: "Checkout error rate elevated on mobile"
+      summary: >
+        Checkout error rate spiked with no preceding release; mobile payment
+        conversions are failing at elevated rates.

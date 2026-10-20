@@ -1,0 +1,43 @@
+# Evaluation variant: deployment WITHOUT incident (Phase 9 Gate 4, anti-causation).
+# A checkout deployment ships, but nothing degrades: monitoring stays healthy,
+# no alert fires, no incident opens, and sales are unaffected (multipliers 1.0).
+# A correct investigation must NOT attribute an outage or decline to this
+# deployment — the temporal correlation exists, the effect does not.
+#
+# Derived from backend/mcp/fixtures/scenario.yaml (canonical trio split apart);
+# seed and date bounds unchanged so all fixture generation stays deterministic.
+
+scenario:
+  name: checkout_deployment_without_incident_v1
+  seed: 42
+  start_date: 2026-07-08
+  end_date: 2026-10-05
+
+  baseline:
+    start_date: 2026-09-06
+    end_date: 2026-10-02
+
+  incident:                     # window kept for spec coherence; no impact applied
+    start_date: 2026-10-03
+    end_date: 2026-10-05
+    affected_channel: mobile
+    description: >
+      Control window: a checkout release shipped but no degradation followed.
+      Sales and service telemetry remain within baseline bands throughout.
+
+  impact:
+    channel_multipliers:
+      mobile: [1.0, 1.0, 1.0]
+      desktop: [1.0, 1.0, 1.0]
+
+  deployment:                   # present: the temporal correlation the model must not over-read
+    repository: ronni86bit/MCP-Agent-Project
+    service: checkout
+    environment: production
+    deployed_at: 2026-10-02T18:30:00Z
+    commit_message: "checkout: routine dependency bump and logging cleanup, no behavior change"
+
+  monitoring:
+    services: [checkout, payment, catalog, web]
+    alert: null                 # no alert fires
+    incident: null              # no incident opens

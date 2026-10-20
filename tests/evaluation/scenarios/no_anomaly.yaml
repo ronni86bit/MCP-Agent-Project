@@ -1,0 +1,39 @@
+# Evaluation variant: no anomaly anywhere (Phase 9 Gate 4, calibration).
+# No deployment, no alert, no incident, no sales impact: every system is
+# healthy across the whole range. A correct investigation reports healthy
+# operations with grounded claims and must not fabricate an anomaly.
+# The catalog background records (ALT-1044 / INC-0987, September 15, resolved)
+# remain present in every variant as realistic low-severity history.
+#
+# Derived from backend/mcp/fixtures/scenario.yaml (canonical trio split apart);
+# seed and date bounds unchanged so all fixture generation stays deterministic.
+
+scenario:
+  name: checkout_no_anomaly_v1
+  seed: 42
+  start_date: 2026-07-08
+  end_date: 2026-10-05
+
+  baseline:
+    start_date: 2026-09-06
+    end_date: 2026-10-02
+
+  incident:                     # control window: no impact applied
+    start_date: 2026-10-03
+    end_date: 2026-10-05
+    affected_channel: mobile
+    description: >
+      Control window: all systems and sales channels operate within baseline
+      bands; there is no anomaly to explain.
+
+  impact:
+    channel_multipliers:
+      mobile: [1.0, 1.0, 1.0]
+      desktop: [1.0, 1.0, 1.0]
+
+  deployment: null
+
+  monitoring:
+    services: [checkout, payment, catalog, web]
+    alert: null
+    incident: null

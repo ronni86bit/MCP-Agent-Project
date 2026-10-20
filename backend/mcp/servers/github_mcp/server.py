@@ -59,9 +59,12 @@ def _finish(tool: str, started: float, payload: dict[str, Any]) -> dict[str, Any
     return payload
 
 
-def scenario_deployment_record() -> dict[str, Any]:
-    """The demo storyline's checkout deployment, from scenario.yaml."""
+def scenario_deployment_record() -> dict[str, Any] | None:
+    """The demo storyline's checkout deployment, from scenario.yaml — None
+    when the active scenario variant defines no deployment."""
     deployment = load_scenario().deployment
+    if deployment is None:
+        return None
     seed = f"{deployment.repository}:{deployment.deployed_at_utc.isoformat()}"
     return {
         "id": 0,
@@ -113,7 +116,7 @@ async def get_deployments(limit: int = 10) -> dict[str, Any]:
         live = await _client.deployments(limit=inp.limit)
     except GitHubError as exc:
         raise ToolError(f"github request failed: {exc}") from None
-    records = [*live, scenario_deployment_record()]
+    records = [*live, *(record for record in [scenario_deployment_record()] if record is not None)]
     records.sort(key=lambda record: record.get("created_at") or "", reverse=True)
     return _finish(
         "get_deployments", started,
