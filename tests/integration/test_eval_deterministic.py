@@ -117,6 +117,10 @@ async def test_dsel_unequal_windows_rejected_server_side(pg_manager):
     async with managers:
         case = await cases.case_selection_arguments(
             llm=_scripted([unequal, equal]), managers=managers, settings=_settings(),
+            # fresh manager for the loop run: re-entering the audit-phase
+            # instance races anyio's stdio teardown on Windows (observed as
+            # a spurious CancelledError in this test)
+            loop_factory=lambda: MultiMCPManager({"postgres-mcp": lambda: pg_manager()}),
         )
 
     names = {c.name: c for c in case.checks}

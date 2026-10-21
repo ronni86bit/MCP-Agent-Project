@@ -1,5 +1,11 @@
-# Development services. The backend/frontend services are added in Phase 10;
-# Phase 2 needs only PostgreSQL. Host port 5433 avoids clashes with any local PG.
+# Single-host development/demo stack (Phase 10 Gate 1).
+#   postgres : PostgreSQL 16 on host port 5433 (avoids clashing with local PG)
+#   seeder   : one-shot deterministic sales_data seed (idempotent; agent_state untouched)
+#   backend  : FastAPI API + MCP stdio subprocess runtime on host port 8000
+#
+# Ollama is NOT containerized: the backend reaches the host's Ollama via
+# host.docker.internal (OLLAMA_HOST). Start Ollama on the host and pull the
+# model named in OLLAMA_MODEL before running investigations.
 
 services:
   postgres:
@@ -12,7 +18,12 @@ services:
       # Consumed by scripts/seed_db.py when creating the read-only role.
       POSTGRES_MCP_RO_PASSWORD: ro_dev_password
     ports:
-      - "5433:5432"
+      # Host-local only (loopback dual-stack): nothing outside this machine
+      # needs the database. Both families are explicit because a bare
+      # 127.0.0.1 bind makes `localhost` connections stall ~2s on the ::1
+      # attempt before IPv4 fallback (breaks the 2s dev probes).
+      - "127.0.0.1:5433:5432"
+      - "[::1]:5433:5432"
     volumes:
       - ops_pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -20,6 +31,62 @@ services:
       interval: 5s
       timeout: 3s
       retries: 12
+
+  seeder:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.backend
+    container_name: ops-agent-seeder
+    # Idempotent: DROP/CREATE of the sales_data schema only (deterministic
+    # rows); the read-only role creation tolerates re-runs. agent_state,
+    # which holds persisted investigations and approvals, is never touched.
+    # `-m` (not a script path) so /app is importable without PYTHONPATH.
+    command: ["python", "-m", "scripts.seed_db",
+              "--dsn", "postgresql://ops_admin:ops_admin_dev@postgres:5432/ops_agent"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  backend:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.backend
+    container_name: ops-agent-backend
+    environment:
+      LOG_LEVEL: INFO
+      # MCP subprocesses connect to the compose-internal postgres hostname.
+      POSTGRES_MCP_DSN: postgresql://postgres_mcp_ro:ro_dev_password@postgres:5432/ops_agent
+      OPS_ADMIN_DSN: postgresql://ops_admin:ops_admin_dev@postgres:5432/ops_agent
+      # Host Ollama (no Ollama service here); host-gateway keeps this working
+      # on Linux where host.docker.internal is not built in.
+      OLLAMA_HOST: http://host.docker.internal:11434
+      # The human-approval write path stays OFF unless explicitly enabled.
+      ACTION_MODE_ENABLED: "false"
+      GITHUB_REPO: ronni86bit/MCP-Agent-Project
+    depends_on:
+      postgres:
+        condition: service_healthy
+      seeder:
+        condition: service_completed_successfully
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      # Host-local only: the API is unauthenticated (single-operator demo).
+      # Host 18080 (not 8000/8080): occupied on this machine by WSL relays;
+      # the container always listens on 8000 regardless of the host port.
+      - "127.0.0.1:18080:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 5s
+    # SIGTERM (docker stop) -> uvicorn graceful shutdown -> lifespan shutdown
+    # (cancel investigations, close pool, drain approval writes); the next
+    # boot's interrupted-run sweep recovers anything that did not drain.
+    stop_grace_period: 30s
 
 volumes:
   ops_pgdata:

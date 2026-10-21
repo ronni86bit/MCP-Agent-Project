@@ -1,0 +1,22 @@
+# Keep the build context small and secret-free: the image needs only the
+# lockfile, backend/ (API + MCP servers + fixtures), and scripts/ (seeder).
+.git
+.venv
+.env
+.env.*
+!.env.example
+.zcode
+.pytest_cache
+.ruff_cache
+__pycache__
+**/__pycache__
+*.py[cod]
+evaluation
+frontend
+tests
+docker
+docker-compose.yml
+AGENTS.md
+README.md
+MCP_Tool_Using_Production_Agent_Project_Guide.docx
+*.docx

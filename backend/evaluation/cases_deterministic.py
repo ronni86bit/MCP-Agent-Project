@@ -86,6 +86,7 @@ def _result(case_id: str, record: InvestigationRecord, latency_ms: float,
 
 async def case_selection_arguments(
     *, llm: Any, managers: Any, settings: Settings, failing_tool: str = "postgres-mcp__compare_sales",
+    loop_factory: Callable[[], Any] | None = None,
 ) -> CaseResult:
     """D-SEL: unequal-duration compare_sales is rejected at the verified
     boundary — server-side tool logic (postgres_mcp models.py model_validator),
@@ -93,7 +94,13 @@ async def case_selection_arguments(
     proves the agent-side schema check passes for the invalid arguments (so the
     request reaches the tool), then the loop run proves the server-side typed
     rejection (`ToolExecutionError`), that no evidence was created, and — as
-    the positive control — that equal-duration windows execute successfully."""
+    the positive control — that equal-duration windows execute successfully.
+
+    `loop_factory` optionally supplies a FRESH manager for the loop run: the
+    caller's entered instance has stdio worker threads from its audit phase,
+    and re-entering the same instance races anyio's teardown on Windows
+    (observed as spurious CancelledError). Defaults to re-entering `managers`,
+    the pre-Gate-1 behavior."""
     # boundary audit: the agent-side schema gate must NOT reject these
     from backend.agent.catalog import SERVER_ALLOWLISTS, ToolCatalog
     from backend.agent.executor import Executor
@@ -117,7 +124,8 @@ async def case_selection_arguments(
         f"request must reach the tool (validation.ok={validation.ok}, error={validation.error})",
     )
 
-    record, latency_ms = await _run_loop(llm, lambda: managers, settings)
+    record, latency_ms = await _run_loop(
+        llm, loop_factory or (lambda: managers), settings)
     checks = [schema_gate_result, *graders.failure_checks(
         record,
         failing_tool=failing_tool,
