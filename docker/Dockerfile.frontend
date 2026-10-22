@@ -1,0 +1,17 @@
+# Frontend console (Phase 10 Gate 2): build the React/Vite app, serve the
+# static bundle with nginx. The same nginx reverse-proxies /api to the
+# backend service — see docker/nginx.conf.
+
+FROM node:20-alpine AS build
+WORKDIR /build
+COPY frontend/package.json frontend/package-lock.json* ./
+RUN npm install
+COPY frontend/ ./
+# VITE_API_BASE is unnecessary: the app uses relative paths and nginx
+# proxies /api to the backend service.
+RUN npm run build
+
+FROM nginx:1.27-alpine
+COPY docker/nginx.conf /etc/nginx/conf.d/default.conf
+COPY --from=build /build/dist /usr/share/nginx/html
+EXPOSE 80

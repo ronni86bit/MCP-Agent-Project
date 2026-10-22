@@ -88,5 +88,20 @@ services:
     # boot's interrupted-run sweep recovers anything that did not drain.
     stop_grace_period: 30s
 
+  frontend:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.frontend
+    container_name: ops-agent-frontend
+    # Static console + /api reverse proxy (SSE-safe: no buffering).
+    # Host port is configurable and loopback-bound: this is a LOCAL
+    # single-operator demo — the API behind it is unauthenticated and must
+    # not be exposed to an untrusted network.
+    ports:
+      - "127.0.0.1:${FRONTEND_HOST_PORT:-8090}:80"
+    depends_on:
+      backend:
+        condition: service_healthy
+
 volumes:
   ops_pgdata:
