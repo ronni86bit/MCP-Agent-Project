@@ -1,6 +1,6 @@
 # Benchmark summary
 
-**Runs: 7** — MIXED revision states across runs — compare within, not across: gate2=166b1625(clean); gate2-second=166b1625(clean); gate5-smoke=bdecbea4(dirty); gate5-model=bdecbea4(dirty); gate5-anti=bdecbea4(dirty); gate5-model-r2=bdecbea4(dirty); gate5-anti-r2=bdecbea4(dirty)
+**Runs: 8** — MIXED revision states across runs — compare within, not across: gate2=166b1625(clean); gate2-second=166b1625(clean); gate5-smoke=bdecbea4(dirty); gate5-model=bdecbea4(dirty); gate5-anti=bdecbea4(dirty); gate5-model-r2=bdecbea4(dirty); gate5-anti-r2=bdecbea4(dirty); gate3-cleanclone=0f851540(dirty)
 
 | run | suite | cases | pass | pass× | pass (excl. infra) | infra | p50 ms | p95 ms | tokens (p/c) | commit | dirty |
 |---|---|---|---|---|---|---|---|---|---|---|---|
@@ -11,8 +11,9 @@
 | gate5-anti | anti-causation | 3 | 0 | 0.0% | 0.0% | 0 | 9660.6 | 9912.1 | None/None (+3 missing) | bdecbea4 | yes |
 | gate5-model-r2 | model | 4 | 2 | 50.0% | 50.0% | 0 | 115508.3 | 610469.3 | 84810/4187 | bdecbea4 | yes |
 | gate5-anti-r2 | anti-causation | 3 | 0 | 0.0% | 0.0% | 0 | 436903.0 | 571074.3 | 45315/3523 | bdecbea4 | yes |
+| gate3-cleanclone | deterministic | 11 | 11 | 100.0% | 100.0% | 0 | 6.0 | 1688.6 | None/None (+11 missing) | 0f851540 | yes |
 
-Failure layers: gate2: none:11; gate2-second: none:11; gate5-smoke: none:11; gate5-model: none:2, unknown:2; gate5-anti: reasoning:3; gate5-model-r2: none:2, reasoning:2; gate5-anti-r2: reasoning:2, unknown:1
+Failure layers: gate2: none:11; gate2-second: none:11; gate5-smoke: none:11; gate5-model: none:2, unknown:2; gate5-anti: reasoning:3; gate5-model-r2: none:2, reasoning:2; gate5-anti-r2: reasoning:2, unknown:1; gate3-cleanclone: none:11
 
 ## Per-case stability
 
@@ -61,3 +62,14 @@ Failure layers: gate2: none:11; gate2-second: none:11; gate5-smoke: none:11; gat
 | gate5-anti-r2 | V:deployment_without_incident | 1 | 0 | reasoning:1 | 436903.0 | 436903.0 |
 | gate5-anti-r2 | V:incident_without_deployment | 1 | 0 | unknown:1 | 254344.3 | 254344.3 |
 | gate5-anti-r2 | V:no_anomaly | 1 | 0 | reasoning:1 | 571074.3 | 571074.3 |
+| gate3-cleanclone | D-APPROVE | 1 | 1 | none:1 | 1251.7 | 1251.7 |
+| gate3-cleanclone | D-BUDGET:llm_calls | 1 | 1 | none:1 | 3.6 | 3.6 |
+| gate3-cleanclone | D-BUDGET:steps | 1 | 1 | none:1 | 4.8 | 4.8 |
+| gate3-cleanclone | D-BUDGET:wall_clock | 1 | 1 | none:1 | 206.1 | 206.1 |
+| gate3-cleanclone | D-CANCEL | 1 | 1 | none:1 | 67.7 | 67.7 |
+| gate3-cleanclone | D-CIRCUIT | 1 | 1 | none:1 | 6.0 | 6.0 |
+| gate3-cleanclone | D-EV | 1 | 1 | none:1 | 6.1 | 6.1 |
+| gate3-cleanclone | D-FAIL | 1 | 1 | none:1 | 6.0 | 6.0 |
+| gate3-cleanclone | D-GAP | 1 | 1 | none:1 | 4.9 | 4.9 |
+| gate3-cleanclone | D-GROUND | 1 | 1 | none:1 | 4.9 | 4.9 |
+| gate3-cleanclone | D-SEL | 1 | 1 | none:1 | 1688.6 | 1688.6 |

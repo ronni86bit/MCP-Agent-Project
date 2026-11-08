@@ -8,19 +8,72 @@ evidence-grounded conclusions with human-approved actions.
 Canonical scenario: *"Why did today's sales drop?"* — answered by correlating sales data,
 a recent checkout deployment, rising checkout error rates, and the resulting alert/incident.
 
-**Status: Phase 8 — production observability (structured logging + correlation IDs + redaction, Prometheus metrics, liveness/readiness endpoints).**
-(Phase 1: MCP fundamentals · Phase 2: postgres-mcp · Phase 3: agent runtime · Phase 4: multi-server correlation · Phase 5: planning & state · Phase 6: reliability · Phase 7: human-in-the-loop approvals — complete.)
+**Why this project:** the LLM is not the product — the product is the reliable system around
+it. Every conclusion must cite tool-retrieved evidence (the verifier drops or flags
+unsupported claims and downgrades causal language), every tool call is observable and
+budgeted, every failure is typed and recovered explicitly, and the single write action is
+gated behind a persisted human-approval workflow. The evaluation framework measures exactly
+that: selection accuracy, evidence coverage, grounding, anti-causation discipline, and
+failure handling — with recorded, reproducible runs.
+
+**Status: Phase 10 complete — deployment & portfolio (Docker Compose stack, browser console, evaluation framework, docs).**
+Phases 1–10 all complete: MCP fundamentals · postgres-mcp · agent runtime · multi-server
+correlation · planning & state · reliability · human-in-the-loop approvals · production
+observability · evaluation & benchmarking · deployment & portfolio.
 
 - Engineering rules & architecture decisions: see [AGENTS.md](AGENTS.md).
 - Project guide: `MCP_Tool_Using_Production_Agent_Project_Guide.docx`.
 
 ## Quickstart
 
+### A. Docker Compose demo (browser investigation — the 10-minute path)
+
+Prerequisites: **Docker Desktop** (or Docker Engine + Compose v2) and **host Ollama** with a
+tool-capable model. No other services; everything is free and local.
+
+```bash
+copy .env.example .env        # Windows (cp on POSIX); dev defaults are documented, not real secrets
+docker compose up -d --build  # postgres -> seeder -> backend -> frontend (first build: several minutes)
+```
+
+Then open **http://127.0.0.1:8090/** and click **Investigate** on the pre-filled canonical
+question. The console shows live SSE status while the agent plans, calls MCP tools, and
+synthesizes a grounded report (a CPU-only run takes roughly 5–15 minutes). Operations
+endpoints: `http://127.0.0.1:18080/health`, `/ready`, `/metrics`.
+
+> **Security boundary:** this is a **local, single-operator demo**. The API is
+> unauthenticated and everything is published on `127.0.0.1` only — do not expose it to an
+> untrusted network.
+
+### B. Local development (tests and phase demos)
+
 ```bash
 uv sync                                   # create .venv and install deps
 uv run python scripts/toy_client_demo.py  # Phase 1: toy MCP server round-trip
-uv run python scripts/dev_check.py        # phase gate: tests + both demos
+uv run pytest tests/unit tests/integration -q
+uv run python scripts/dev_check.py        # phase gate: tests + demos -> PHASE GATE PASSED (Phases 1-10)
 ```
+
+### Architecture
+
+```
+browser console (React/Vite, nginx)
+      │  /api (HTTP + SSE)
+      ▼
+FastAPI backend (uvicorn) ── InvestigationLoop: UNDERSTAND → PLAN → SELECT → VALIDATE
+      │                                    → EXECUTE → OBSERVE → CORRELATE → VERIFY → REPORT
+      │                                    → (optional) propose_action
+      ├─ MCP stdio subprocesses (same image): postgres-mcp · monitoring-mcp · github-mcp
+      │      (discovery + tool invocation over stdio; allowlisted, policy-checked)
+      ├─ PostgreSQL: agent_state schema (persisted investigations, approvals) + sales_data (seeded)
+      └─ host Ollama (OpenAI-compatible endpoint) for the LLM
+```
+
+Component responsibilities: the **loop** orchestrates and reasons; the **MCP servers** expose
+exactly the allowed capabilities (14 read-only tools + the human-approved
+`acknowledge_alert` write); **nginx** serves the console and proxies `/api` (SSE-safe);
+**PostgreSQL** persists investigation state and approval audit; **Postgres seeder** rebuilds
+the deterministic `sales_data` fixtures (idempotent, `agent_state` untouched).
 
 ## Phase 2 — PostgreSQL MCP (`postgres-mcp`)
 
@@ -331,6 +384,84 @@ but never reconstructed. Which model benchmarks were actually executed is
 recorded by the committed runs under `evaluation/results/` — see their
 manifests; unexecuted suites are not claimed anywhere.
 
+## Phase 10 — Deployment & portfolio (compose stack, console, docs)
+
+### The Compose stack
+
+| Service | Image | Purpose | Published (host) |
+|---|---|---|---|
+| `postgres` | postgres:16-alpine | business + state store, named volume `ops_pgdata` | `127.0.0.1:5433` + `[::1]:5433` |
+| `seeder` | built backend image | one-shot deterministic `sales_data` seed (idempotent; `agent_state` untouched) | — |
+| `backend` | built backend image | FastAPI API + the three MCP stdio subprocess runtimes | `127.0.0.1:18080` |
+| `frontend` | node build → nginx | console static bundle + `/api` reverse proxy (SSE-safe) | `127.0.0.1:${FRONTEND_HOST_PORT:-8090}` |
+
+Startup ordering is dependency-driven: `postgres` (healthcheck) → `seeder` (must exit 0) →
+`backend` (healthcheck on `/health`) → `frontend`. Host ports 8000/8080 are deliberately
+avoided (commonly occupied on Windows by WSL relays); all publishes are loopback-only.
+
+### Configuration
+
+Everything is environment-driven (`.env`, see `.env.example`): `OLLAMA_HOST`/`OLLAMA_MODEL`
+(host Ollama is required at `http://localhost:11434` by default — the compose backend
+overrides this to `http://host.docker.internal:11434`, with `host-gateway` mapping for
+Linux), LLM timeout/temperature/retries, loop budgets (`MAX_INVESTIGATION_SECONDS=1200`,
+`MAX_LLM_CALLS=16`, …), MCP call timeout, circuit-breaker/rate-limit knobs, Postgres DSNs
+(dev credentials are documented defaults, not real secrets), approval settings, and
+`GITHUB_TOKEN` (optional, fine-grained read-only). Compose adds `FRONTEND_HOST_PORT`
+(default 8090). `ACTION_MODE_ENABLED` ships `false`: the write path is off unless you
+explicitly turn it on.
+
+### Operations
+
+- **Seeding & recovery:** the seeder rebuilds `sales_data` deterministically on every
+  `compose up` (idempotent, never touches `agent_state`). On boot, the backend applies the
+  `agent_state` schema and runs a recovery sweep: investigations interrupted by a previous
+  shutdown become `interrupted` (never silently re-run); in-flight approval writes become
+  `uncertain` for read-back recovery.
+- **Shutdown:** `docker stop` triggers uvicorn's graceful shutdown (investigations
+  cancelled, pool closed, approval writes drained within a 30 s grace period).
+- **Endpoints:** `/health` (static liveness), `/ready` (30 s-cached dependency check: host
+  Ollama + all three MCP servers; the Postgres state store is informational — startup
+  degrades to in-memory if it is down), `/metrics` (the `ops_agent_*` Prometheus families),
+  `/api/health` (uncached per-dependency detail).
+- **SSE:** `GET /api/investigations/{id}/events` streams `status` snapshots (1 s poll of the
+  live record — transitions between polls coalesce, so not every internal transition is
+  emitted), a `terminal` event, and keepalive comments; the stream is unbuffered end-to-end
+  (`X-Accel-Buffering: no` + nginx `proxy_buffering off`).
+
+### Approval-gated actions
+
+`acknowledge_alert` is the only write action. Even with action mode enabled, the model can
+only **propose**; a persisted proposal must be approved by a named operator through the
+console or API before execution, execution always uses the stored arguments, and a post-
+write read-back verification is recorded. With `ACTION_MODE_ENABLED=false` (the default in
+compose) the propose phase never runs.
+
+### Troubleshooting
+
+| Symptom | Cause / fix |
+|---|---|
+| `docker compose up` fails to bind 8000/8080/5433 | Windows WSL relays or a local Postgres often hold 8000/8080; the compose file already uses 18080/8090/5433 — override `FRONTEND_HOST_PORT` or edit the port lines |
+| `localhost:5433` connections stall ~2 s | a `127.0.0.1`-only bind makes the `::1` attempt hang; the compose file publishes both `127.0.0.1` and `[::1]` — keep both |
+| `/ready` reports `ollama down` | start Ollama on the host and `ollama pull qwen3:4b-instruct` (or set `OLLAMA_MODEL`); on Linux add `host.docker.internal:host-gateway` (compose already does) |
+| `FAILED: PostgreSQL unreachable` during `dev_check` | start the stack's database: `docker compose up -d postgres` |
+| frontend blank / API 404 from the console | nginx proxies `/api` to the `backend` service — check `docker compose ps backend` is healthy |
+| investigation `status: failed` | read `failure_reason` in the API/console; typed MCP failures (timeouts, circuit-open) are reported as source-unavailable, never silently skipped |
+
+### Portfolio description
+
+This repository is an end-to-end demonstration of building a *reliable system around an
+LLM*: a bounded, checkpointed investigation loop; dynamic tool discovery over MCP with
+policy allowlists; typed failure taxonomy with retries, rate limits, and circuit breakers;
+deterministic grounding verification with causal-language discipline; a persisted,
+human-approval-gated write path; Prometheus metrics, structured logging with secret
+redaction, and liveness/readiness endpoints; a recorded evaluation framework (selection
+accuracy, evidence coverage, grounding, anti-causation scenario variants, conservative
+failure classification); and a single-command Docker Compose deployment with a browser
+console. Evidence: 358 automated tests, a seven-step phase gate, and recorded benchmark
+runs under `evaluation/results/` (see the Phase 9 section for honest findings on a
+small-model runtime).
+
 ## Layout
 
-`backend/` (api, agent, mcp servers + client, security, observability) · `frontend/` (React/Vite console, later phases) · `tests/` (unit, integration, e2e, evaluation) · `scripts/` · `docker/` + `docker-compose.yml`.
+`backend/` (api, agent, mcp servers + client, security, observability) · `frontend/` (React/Vite console) · `tests/` (unit, integration, e2e, evaluation) · `scripts/` · `docker/` + `docker-compose.yml`.
